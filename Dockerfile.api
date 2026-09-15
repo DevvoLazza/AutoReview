@@ -1,0 +1,16 @@
+FROM node:24.16.0-bookworm-slim AS build
+ENV PNPM_HOME=/pnpm
+ENV PATH=$PNPM_HOME:$PATH
+RUN corepack enable
+WORKDIR /workspace
+COPY . .
+RUN pnpm install --frozen-lockfile
+RUN pnpm --filter @reviewguard/api... build
+
+FROM node:24.16.0-bookworm-slim AS runtime
+ENV NODE_ENV=production
+WORKDIR /workspace
+COPY --from=build /workspace /workspace
+USER node
+EXPOSE 4100
+CMD ["node", "apps/api/dist/main.js"]

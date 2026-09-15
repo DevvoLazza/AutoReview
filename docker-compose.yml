@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: pgvector/pgvector:pg18
+    environment:
+      POSTGRES_DB: reviewguard
+      POSTGRES_USER: reviewguard
+      POSTGRES_PASSWORD: reviewguard
+    ports:
+      - "5432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U reviewguard -d reviewguard"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    volumes:
+      - reviewguard-postgres:/var/lib/postgresql/data
+
+volumes:
+  reviewguard-postgres:

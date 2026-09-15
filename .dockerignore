@@ -1,0 +1,13 @@
+node_modules
+**/node_modules
+**/dist
+**/dist-android
+**/dist-ios
+**/.next
+.git
+.env
+.env.*
+!.env.example
+coverage
+infra/terraform/.terraform
+*.tfstate*
