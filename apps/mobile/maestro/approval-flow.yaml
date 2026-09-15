@@ -1,0 +1,7 @@
+appId: com.reviewguard.mobile
+---
+- launchApp
+- assertVisible: "Recensioni recenti"
+- tapOn: "Giulia R."
+- assertVisible: "Risposta pubblica"
+- assertVisible: "Approva e pubblica"

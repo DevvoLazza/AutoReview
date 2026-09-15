@@ -1,0 +1,71 @@
+import type { ReviewCase } from "@reviewguard/contracts";
+
+const tenantId = "11111111-1111-4111-8111-111111111111";
+const locationId = "33333333-3333-4333-8333-333333333333";
+
+export const mobileDemoReviews: ReviewCase[] = [
+  {
+    id: "55555555-5555-4555-8555-555555555551",
+    tenantId,
+    snapshot: {
+      googleReviewName: "accounts/demo/locations/demo/reviews/review-positive",
+      locationId,
+      reviewerDisplayName: "Giulia R.",
+      starRating: 5,
+      comment: "Servizio impeccabile, personale gentile e ambiente molto curato.",
+      languageHint: "it",
+      createTime: "2026-09-16T09:30:00.000Z",
+      updateTime: "2026-09-16T09:30:00.000Z",
+      existingReply: null,
+    },
+    status: "pending_approval",
+    version: 3,
+    activeDraft: {
+      text: "Grazie Giulia per le belle parole. Siamo felici che abbia apprezzato l'accoglienza e la cura dell'ambiente. Speriamo di rivederla presto.",
+      language: "it",
+      category: "praise",
+      riskFlags: [],
+      knowledgeSourceIds: ["44444444-4444-4444-8444-444444444444"],
+      unsupportedClaims: [],
+      requiresHumanReview: false,
+    },
+    validation: {
+      valid: true,
+      detectedLanguage: "it",
+      riskFlags: [],
+      unsupportedClaims: [],
+      reasons: [],
+    },
+    scheduledAt: null,
+    matchedRuleId: null,
+    publishedAt: null,
+    publishedReply: null,
+    createdAt: "2026-09-16T09:30:00.000Z",
+    updatedAt: "2026-09-16T09:30:00.000Z",
+  },
+  {
+    id: "55555555-5555-4555-8555-555555555553",
+    tenantId,
+    snapshot: {
+      googleReviewName: "accounts/demo/locations/demo/reviews/review-risk",
+      locationId,
+      reviewerDisplayName: "Andrea P.",
+      starRating: 1,
+      comment: "Chiederò il rimborso e sentirò il mio avvocato per quanto accaduto.",
+      languageHint: "it",
+      createTime: "2026-09-15T18:20:00.000Z",
+      updateTime: "2026-09-15T18:20:00.000Z",
+      existingReply: null,
+    },
+    status: "needs_attention",
+    version: 2,
+    activeDraft: null,
+    validation: null,
+    scheduledAt: null,
+    matchedRuleId: null,
+    publishedAt: null,
+    publishedReply: null,
+    createdAt: "2026-09-15T18:20:00.000Z",
+    updatedAt: "2026-09-15T18:20:00.000Z",
+  },
+];

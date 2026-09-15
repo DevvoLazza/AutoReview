@@ -1,0 +1,43 @@
+{
+  "expo": {
+    "name": "ReviewGuard",
+    "slug": "reviewguard",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "scheme": "reviewguard",
+    "userInterfaceStyle": "automatic",
+    "newArchEnabled": true,
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.reviewguard.mobile",
+      "infoPlist": {
+        "NSUserNotificationUsageDescription": "ReviewGuard usa le notifiche per segnalare recensioni che richiedono approvazione."
+      }
+    },
+    "android": {
+      "package": "com.reviewguard.mobile",
+      "adaptiveIcon": {
+        "backgroundColor": "#123f30"
+      }
+    },
+    "plugins": [
+      "expo-router",
+      "expo-secure-store",
+      [
+        "expo-notifications",
+        {
+          "color": "#176b4d",
+          "defaultChannel": "approvals"
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "00000000-0000-0000-0000-000000000000"
+      }
+    }
+  }
+}
