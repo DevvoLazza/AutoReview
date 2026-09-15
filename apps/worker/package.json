@@ -1,0 +1,26 @@
+{
+  "name": "@reviewguard/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/main.js",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:coverage": "vitest run --coverage"
+  },
+  "dependencies": {
+    "@reviewguard/contracts": "workspace:*",
+    "@reviewguard/database": "workspace:*",
+    "fastify": "5.12.4",
+    "jose": "6.2.12",
+    "zod": "4.6.5"
+  },
+  "devDependencies": {
+    "tsx": "4.23.13",
+    "typescript": "5.9.3",
+    "vitest": "5.0.1"
+  }
+}
