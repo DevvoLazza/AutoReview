@@ -496,8 +496,8 @@ resource "google_project_iam_member" "pubsub_subscription_reader" {
 }
 
 resource "google_pubsub_subscription" "google_reviews_push" {
-  name  = "${local.name}-google-reviews-push"
-  topic = google_pubsub_topic.google_reviews.id
+  name                       = "${local.name}-google-reviews-push"
+  topic                      = google_pubsub_topic.google_reviews.id
   ack_deadline_seconds       = 60
   message_retention_duration = "604800s"
   retry_policy {
