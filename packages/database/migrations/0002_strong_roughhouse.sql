@@ -1,0 +1,1 @@
+ALTER TABLE "review_cases" ADD COLUMN "matched_rule_id" uuid;

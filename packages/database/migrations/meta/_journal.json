@@ -1,0 +1,27 @@
+{
+  "version": "7",
+  "dialect": "postgresql",
+  "entries": [
+    {
+      "idx": 0,
+      "version": "7",
+      "when": 1789513028814,
+      "tag": "0000_spicy_dragon_lord",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1789513028815,
+      "tag": "0001_security_invariants",
+      "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1789513334088,
+      "tag": "0002_strong_roughhouse",
+      "breakpoints": true
+    }
+  ]
+}
