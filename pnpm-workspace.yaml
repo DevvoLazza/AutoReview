@@ -1,0 +1,26 @@
+packages:
+  - apps/*
+  - packages/*
+
+allowBuilds:
+  '@scarf/scarf': false
+  esbuild: true
+  protobufjs: true
+
+overrides:
+  decode-uri-component: 0.5.0
+  uuid: 11.1.1
+
+minimumReleaseAgeExclude:
+  - '@expo/cli@57.0.25'
+  - '@expo/router-server@57.0.10'
+  - '@nestjs/common@12.0.3'
+  - '@nestjs/core@12.0.3'
+  - '@nestjs/platform-fastify@12.0.3'
+  - '@vitest/coverage-v8@5.0.1'
+  - '@vitest/mocker@5.0.1'
+  - '@vitest/spy@5.0.1'
+  - babel-preset-expo@57.0.12
+  - expo-notifications@57.0.19
+  - expo@57.0.23
+  - vitest@5.0.1
