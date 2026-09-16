@@ -6,9 +6,9 @@ import {
   decideAutomation,
   detectHardStops,
   type GoogleBusinessGateway,
-  InMemoryKnowledgeRetriever,
   type ReplyModelProvider,
 } from "@reviewguard/core";
+import { KnowledgeService } from "./knowledge.service.js";
 import { ReviewNotificationService } from "./notifications.js";
 import { AI_PROVIDER, GOOGLE_GATEWAY } from "./providers.js";
 import { MemoryStore } from "./store.js";
@@ -24,6 +24,7 @@ export class ReviewService {
     @Inject(GOOGLE_GATEWAY) private readonly google: GoogleBusinessGateway,
     private readonly notifications: ReviewNotificationService,
     private readonly tasks: PublishTaskScheduler,
+    private readonly knowledgeService: KnowledgeService,
   ) {}
   list(principal: RequestPrincipal, status?: ReviewCase["status"]) {
     return this.store.listReviews(principal.tenantId, status);
@@ -84,34 +85,11 @@ export class ReviewService {
         this.store.listLocations(principal.tenantId),
         this.store.listRules(principal.tenantId),
       ]);
-      const now = Date.now();
-      const eligible = sources.filter(
-        (entry) =>
-          entry.status === "approved" &&
-          (!entry.locationId || entry.locationId === current.snapshot.locationId) &&
-          (!entry.validFrom || Date.parse(entry.validFrom) <= now) &&
-          (!entry.validUntil || Date.parse(entry.validUntil) > now),
+      const knowledge = await this.knowledgeService.retrieve(
+        principal.tenantId,
+        current.snapshot,
+        sources,
       );
-      const retriever = new InMemoryKnowledgeRetriever(
-        eligible.flatMap(
-          (entry) =>
-            entry.content
-              .match(/[\s\S]{1,3500}/g)
-              ?.map((content) => ({
-                sourceId: entry.id,
-                title: entry.title,
-                content,
-                score: entry.kind === "policy" || entry.kind === "forbidden_claim" ? 1 : 0.15,
-                version: entry.version,
-              })) ?? [],
-        ),
-      );
-      const knowledge = await retriever.retrieve({
-        tenantId: principal.tenantId,
-        locationId: current.snapshot.locationId,
-        review: current.snapshot,
-        limit: 12,
-      });
       const location = locations.find((entry) => entry.id === current.snapshot.locationId);
       const input = {
         review: current.snapshot,
@@ -124,6 +102,7 @@ export class ReviewService {
       const generated = await this.ai.generateDraft(input);
       const checked = await this.ai.validateDraft({ ...input, draft: generated.value });
       const flags = detectHardStops(current.snapshot);
+      if (current.wasUpdated) flags.push("review_updated");
       if (!knowledge.length) flags.push("insufficient_knowledge");
       if (
         generated.value.knowledgeSourceIds.some(
@@ -176,6 +155,9 @@ export class ReviewService {
           validation,
           scheduledAt: decision.scheduledAt,
           matchedRuleId: decision.matchedRuleId,
+          knowledgeVersions: Object.fromEntries(
+            knowledge.map((entry) => [entry.sourceId, entry.version]),
+          ),
         },
       );
       await this.store.appendAudit(
@@ -285,6 +267,43 @@ export class ReviewService {
     if (!review.activeDraft) throw new DomainError("Review has no draft", "missing_draft", 409);
     if (manual && (!principal.mfaVerified || !["owner", "approver"].includes(principal.role)))
       throw new DomainError("MFA and an approver role are required", "mfa_required", 403);
+    if (
+      process.env.GOOGLE_MODE === "live" &&
+      !(await this.store.listLocations(principal.tenantId)).some(
+        (location) =>
+          location.active &&
+          location.id === review.snapshot.locationId &&
+          review.snapshot.googleReviewName.startsWith(
+            `${location.googleAccountName}/${location.googleLocationName}/reviews/`,
+          ),
+      )
+    )
+      throw new DomainError(
+        "Collega nuovamente la sede prima di pubblicare",
+        "google_location_disconnected",
+        409,
+      );
+    const sources = await this.store.listKnowledge(principal.tenantId);
+    if (
+      review.activeDraft.knowledgeSourceIds.some((sourceId) => {
+        const source = sources.find((entry) => entry.id === sourceId);
+        return (
+          !source ||
+          source.status !== "approved" ||
+          (review.knowledgeVersions?.[sourceId] !== undefined &&
+            review.knowledgeVersions[sourceId] !== source.version) ||
+          (source.locationId && source.locationId !== review.snapshot.locationId) ||
+          (source.validFrom && Date.parse(source.validFrom) > Date.now()) ||
+          (source.validUntil && Date.parse(source.validUntil) <= Date.now())
+        );
+      })
+    )
+      return this.store.transition(principal.tenantId, id, "needs_attention", review.version, {
+        activeDraft: null,
+        validation: null,
+        scheduledAt: null,
+        matchedRuleId: null,
+      });
     if (!manual) {
       if (!review.scheduledAt || Date.parse(review.scheduledAt) > Date.now())
         throw new DomainError("Task arrived before scheduled delivery", "task_early", 503);
@@ -318,31 +337,18 @@ export class ReviewService {
       )
         return this.cancelSchedule(principal, id, review.version);
     }
-    review = await this.store.transition(principal.tenantId, id, "publishing", review.version);
     const value: PublishIntent = {
-      text: review.activeDraft!.text,
+      text: review.activeDraft.text,
       baseVersion: expectedVersion,
       manual,
       startedAt: Date.now(),
     };
-    if (
-      !(await this.store.repository.put(
-        principal.tenantId,
-        "publish",
-        id,
-        value,
-        intent?.version ?? null,
-        new Date(Date.now() + 30 * 86_400_000).toISOString(),
-      ))
-    )
-      throw new DomainError("Publication intent conflict", "publish_conflict", 409);
+    review = await this.store.beginPublication(review, value, intent?.version ?? null);
     try {
       await this.store.appendAudit(principal, "review.approved", "review", id, { manual });
       await this.store.appendAudit(principal, "reply.publish_started", "review", id);
       const token = await this.currentAccessToken(principal.tenantId);
       const canonical = await this.google.getReview(token, review.snapshot.googleReviewName);
-      if (intent && canonical.existingReply === intent.value.text)
-        return this.confirmPublished(principal, review, intent.value, canonical.updateTime);
       if (canonical.updateTime !== review.snapshot.updateTime || canonical.existingReply)
         return this.invalidate(principal, review, canonical);
       await this.google.updateReply(token, review.snapshot.googleReviewName, value.text);
@@ -405,7 +411,8 @@ export class ReviewService {
     snapshot: ReviewSnapshot,
   ) {
     return this.store.transition(principal.tenantId, review.id, "needs_attention", review.version, {
-      snapshot,
+      snapshot: { ...snapshot, locationId: review.snapshot.locationId },
+      wasUpdated: true,
       activeDraft: null,
       validation: null,
       scheduledAt: null,

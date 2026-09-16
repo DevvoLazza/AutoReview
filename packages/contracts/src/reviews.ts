@@ -48,6 +48,9 @@ export const reviewCaseSchema = z.object({
   publishedReply: z.string().max(4_000).nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+  contentExpiresAt: z.iso.datetime().optional(),
+  wasUpdated: z.boolean().optional(),
+  knowledgeVersions: z.record(z.string(), z.number().int().positive()).optional(),
 });
 export type ReviewCase = z.infer<typeof reviewCaseSchema>;
 

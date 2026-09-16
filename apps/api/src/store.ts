@@ -9,6 +9,7 @@ import type {
   ReviewSnapshot,
 } from "@reviewguard/contracts";
 import {
+  DomainError,
   type GoogleTokens,
   NotFoundError,
   transitionReview,
@@ -20,7 +21,7 @@ import {
   type RecordRepository,
 } from "@reviewguard/database";
 import { DEMO_KNOWLEDGE, DEMO_REVIEWS, DEMO_RULES, DEMO_TENANT_ID } from "./demo.js";
-import { TokenVault } from "./token-vault.js";
+import { KmsTokenVault, TokenVault } from "./token-vault.js";
 
 export type Location = {
   id: string;
@@ -38,18 +39,30 @@ export type StoredGoogleTokens = GoogleTokens & { expiresAt: number };
 @Injectable()
 export class MemoryStore implements OnModuleInit, OnModuleDestroy {
   readonly repository: RecordRepository;
-  private readonly vault: TokenVault;
+  private readonly vault: TokenVault | KmsTokenVault;
   constructor() {
     const persistent = process.env.STORAGE_MODE === "postgres";
-    if (process.env.NODE_ENV === "production" && (!persistent || !process.env.TOKEN_ENCRYPTION_KEY))
-      throw new Error("Production requires PostgreSQL and TOKEN_ENCRYPTION_KEY");
-    if (persistent && !process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
+    if (process.env.NODE_ENV === "production" && (!persistent || !process.env.GOOGLE_KMS_KEY_NAME))
+      throw new Error("Production requires PostgreSQL and GOOGLE_KMS_KEY_NAME");
+    if (
+      persistent &&
+      (!process.env.DATABASE_URL ||
+        (!process.env.TOKEN_ENCRYPTION_KEY && !process.env.GOOGLE_KMS_KEY_NAME))
+    )
+      throw new Error("Persistent storage requires DATABASE_URL and an encryption key");
     this.repository = persistent
       ? new PostgresRecordRepository(process.env.DATABASE_URL as string)
       : new MemoryRecordRepository();
-    this.vault = new TokenVault(process.env.TOKEN_ENCRYPTION_KEY);
+    this.vault = process.env.GOOGLE_KMS_KEY_NAME
+      ? new KmsTokenVault(process.env.GOOGLE_KMS_KEY_NAME)
+      : new TokenVault(process.env.TOKEN_ENCRYPTION_KEY);
   }
   async onModuleInit() {
+    if (
+      process.env.NODE_ENV === "production" &&
+      this.repository instanceof PostgresRecordRepository
+    )
+      await this.repository.assertSafeRuntimeRole(process.env.GOOGLE_WEBHOOK_TENANT_ID as string);
     if ((process.env.AUTH_MODE ?? "demo") === "demo" && process.env.NODE_ENV !== "production") {
       for (const [kind, entries] of [
         ["review", DEMO_REVIEWS],
@@ -59,10 +72,12 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
         for (const entry of entries)
           await this.repository.put(entry.tenantId, kind, entry.id, entry, null);
       }
+      const first = DEMO_REVIEWS[0];
+      if (!first) return;
       await this.upsertLocation(DEMO_TENANT_ID, {
-        id: DEMO_REVIEWS[0]!.snapshot.locationId,
+        id: first.snapshot.locationId,
         googleAccountName: "accounts/demo",
-        googleLocationName: `locations/${DEMO_REVIEWS[0]!.snapshot.locationId}`,
+        googleLocationName: `locations/${first.snapshot.locationId}`,
         displayName: "Sede dimostrativa",
         active: true,
         defaultLanguage: "it",
@@ -97,9 +112,10 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
     const id = deterministicUuid(snapshot.googleReviewName);
     const existing =
       (await this.repository.get<ReviewCase>(tenantId, "review", id)) ??
-      (await this.repository.list<ReviewCase>(tenantId, "review")).find(
-        (entry) => entry.value.snapshot.googleReviewName === snapshot.googleReviewName,
-      );
+      ((process.env.AUTH_MODE ?? "demo") === "demo"
+        ? await this.repository.list<ReviewCase>(tenantId, "review")
+        : []
+      ).find((entry) => entry.value.snapshot.googleReviewName === snapshot.googleReviewName);
     if (existing) {
       if (existing.value.snapshot.updateTime === snapshot.updateTime) return existing.value;
       const updated = {
@@ -112,6 +128,8 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
         matchedRuleId: null,
         version: existing.value.version + 1,
         updatedAt: new Date().toISOString(),
+        contentExpiresAt: expiry(),
+        wasUpdated: true,
       };
       if (
         !(await this.repository.put(
@@ -141,6 +159,8 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       publishedReply: null,
       createdAt: now,
       updatedAt: now,
+      contentExpiresAt: expiry(),
+      wasUpdated: false,
     };
     if (!(await this.repository.put(tenantId, "review", id, review, null, expiry())))
       return this.getReview(tenantId, id);
@@ -168,6 +188,29 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       expectedVersion,
     );
   }
+  async beginPublication(review: ReviewCase, intent: unknown, intentVersion: number | null) {
+    const record = await this.repository.get<ReviewCase>(review.tenantId, "review", review.id);
+    if (!record || record.value.version !== review.version)
+      throw new VersionConflictError(review.version, record?.value.version ?? 0);
+    const next = transitionReview(review, "publishing", review.version);
+    const expiresAt =
+      review.contentExpiresAt ??
+      new Date(Date.parse(review.createdAt) + 21 * 86_400_000).toISOString();
+    if (
+      !(await this.repository.putMany(review.tenantId, [
+        { kind: "review", id: review.id, value: next, expectedVersion: record.version, expiresAt },
+        {
+          kind: "publish",
+          id: review.id,
+          value: intent,
+          expectedVersion: intentVersion,
+          expiresAt,
+        },
+      ]))
+    )
+      throw new VersionConflictError(review.version, review.version + 1);
+    return next;
+  }
   async listKnowledge(tenantId: string) {
     return this.values<KnowledgeSource>(tenantId, "knowledge");
   }
@@ -193,17 +236,20 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
     await this.repository.put(principal.tenantId, "knowledge", entry.id, entry, null);
     return entry;
   }
-  async approveKnowledge(tenantId: string, id: string) {
-    return this.changeKnowledge(tenantId, id, "approved");
+  async approveKnowledge(tenantId: string, id: string, expectedVersion: number) {
+    return this.changeKnowledge(tenantId, id, "approved", {}, expectedVersion);
   }
   async changeKnowledge(
     tenantId: string,
     id: string,
     status: KnowledgeSource["status"],
     patch: Partial<KnowledgeSource> = {},
+    expectedVersion?: number,
   ) {
     const entry = await this.repository.get<KnowledgeSource>(tenantId, "knowledge", id);
     if (!entry) throw new NotFoundError("Knowledge source", id);
+    if (expectedVersion !== undefined && expectedVersion !== entry.value.version)
+      throw new VersionConflictError(expectedVersion, entry.value.version);
     const value = {
       ...entry.value,
       ...patch,
@@ -303,17 +349,17 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
     );
     if (entry?.value.completed) return false;
     if (entry && entry.value.leaseUntil > Date.now())
-      throw new VersionConflictError(0, entry.version);
-    return Boolean(
-      await this.repository.put(
-        tenantId,
-        "event",
-        id,
-        { completed: false, leaseUntil: Date.now() + 120_000 },
-        entry?.version ?? null,
-        expiry(2),
-      ),
+      throw new DomainError("Event processing is in progress", "event_busy", 503);
+    const claimed = await this.repository.put(
+      tenantId,
+      "event",
+      id,
+      { completed: false, leaseUntil: Date.now() + 120_000 },
+      entry?.version ?? null,
+      expiry(2),
     );
+    if (!claimed) throw new DomainError("Event lease conflict", "event_busy", 503);
+    return true;
   }
   async completeEvent(tenantId: string, id: string) {
     const entry = await this.repository.get(tenantId, "event", id);
@@ -342,7 +388,7 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
         tenantId,
         "google_tokens",
         "connection",
-        { encrypted: this.vault.seal(value, tenantId) },
+        { encrypted: await this.vault.seal(value, tenantId) },
         record?.version ?? null,
       ))
     )
@@ -479,7 +525,8 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
     return value;
   }
 }
-function expiry(days = 30) {
+// Leave room for hourly cleanup and seven-day encrypted backup/PITR retention.
+function expiry(days = 21) {
   return new Date(Date.now() + days * 86_400_000).toISOString();
 }
 function deterministicUuid(value: string) {

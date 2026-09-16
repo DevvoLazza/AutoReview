@@ -19,6 +19,13 @@ export async function createApp() {
                 "req.headers.cookie",
                 "req.headers.x-reviewguard-worker-secret",
               ],
+              serializers: {
+                req: (request: { method: string; url: string; id: string }) => ({
+                  method: request.method,
+                  path: request.url.split("?")[0],
+                  id: request.id,
+                }),
+              },
             }
           : false,
       bodyLimit: 8_000_000,

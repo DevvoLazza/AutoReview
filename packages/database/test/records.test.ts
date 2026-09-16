@@ -32,8 +32,10 @@ describe.skipIf(!process.env.TEST_DATABASE_URL)(
   "PostgreSQL integration (migrations and non-superuser runtime role required)",
   () => {
     it("persists across connections and uses transactional compare-and-swap", async () => {
-      const one = new PostgresRecordRepository(process.env.TEST_DATABASE_URL!);
-      const two = new PostgresRecordRepository(process.env.TEST_DATABASE_URL!);
+      const url = process.env.TEST_DATABASE_URL;
+      if (!url) throw new Error("TEST_DATABASE_URL is required");
+      const one = new PostgresRecordRepository(url);
+      const two = new PostgresRecordRepository(url);
       const id = crypto.randomUUID();
       try {
         await one.put(tenantA, "settings", id, { name: "persisted" }, null);

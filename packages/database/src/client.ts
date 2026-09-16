@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { drizzle } from "drizzle-orm/node-postgres";
 import { Pool, type PoolConfig } from "pg";
 import * as schema from "./schema.js";
@@ -23,9 +24,7 @@ export async function withTenant<T>(
   ) => Promise<T>,
 ): Promise<T> {
   return database.transaction(async (transaction) => {
-    await transaction.execute(
-      `select set_config('app.tenant_id', '${tenantId.replaceAll("'", "")}', true)`,
-    );
+    await transaction.execute(sql`select set_config('app.tenant_id', ${tenantId}, true)`);
     return operation(transaction);
   });
 }

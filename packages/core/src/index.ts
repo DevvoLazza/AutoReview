@@ -1,6 +1,7 @@
 export * from "./ai/openrouter.js";
 export * from "./ai/prompts.js";
 export * from "./ai/types.js";
+export * from "./auth/identity.js";
 export * from "./automation/decision-engine.js";
 export * from "./errors.js";
 export * from "./google/client.js";

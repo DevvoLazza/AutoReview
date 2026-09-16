@@ -78,7 +78,7 @@ describe("API workflow safety", () => {
         publishTime: new Date().toISOString(),
         data: Buffer.from(
           JSON.stringify({
-          notificationType: "NEW_REVIEW",
+            notificationType: "NEW_REVIEW",
             reviewName: name,
             locationName: "locations/demo-location",
           }),

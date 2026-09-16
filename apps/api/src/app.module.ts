@@ -12,11 +12,16 @@ import {
   KnowledgeController,
   ReviewsController,
 } from "./controllers.js";
+import { DocumentsController } from "./documents.controller.js";
+import { IdentityAccountVerifier } from "./identity-account.js";
+import { IntegrationService } from "./integration.service.js";
+import { KnowledgeService } from "./knowledge.service.js";
 import { ReviewNotificationService } from "./notifications.js";
 import { aiProvider, googleGateway } from "./providers.js";
 import { ReviewService } from "./review.service.js";
 import { MemoryStore } from "./store.js";
 import { PublishTaskScheduler } from "./tasks.js";
+import { WorkspaceController } from "./workspace.controller.js";
 
 @Module({
   controllers: [
@@ -29,12 +34,17 @@ import { PublishTaskScheduler } from "./tasks.js";
     DevicesController,
     IntegrationsController,
     GoogleWebhookController,
+    WorkspaceController,
+    DocumentsController,
   ],
   providers: [
     MemoryStore,
     ReviewService,
     ReviewNotificationService,
     PublishTaskScheduler,
+    IntegrationService,
+    IdentityAccountVerifier,
+    KnowledgeService,
     aiProvider,
     googleGateway,
     { provide: APP_GUARD, useClass: AuthenticationGuard },
