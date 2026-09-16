@@ -12,6 +12,13 @@ locals {
     "servicenetworking.googleapis.com",
     "sqladmin.googleapis.com",
     "cloudtasks.googleapis.com",
+    "cloudscheduler.googleapis.com",
+    "monitoring.googleapis.com",
+    "identitytoolkit.googleapis.com",
+    "aiplatform.googleapis.com",
+    "mybusinessaccountmanagement.googleapis.com",
+    "mybusinessbusinessinformation.googleapis.com",
+    "mybusinessnotifications.googleapis.com",
   ])
 }
 
@@ -102,6 +109,10 @@ resource "google_sql_database_instance" "postgres" {
       enabled                        = true
       point_in_time_recovery_enabled = true
       transaction_log_retention_days = 7
+      backup_retention_settings {
+        retained_backups = 7
+        retention_unit   = "COUNT"
+      }
     }
     ip_configuration {
       ipv4_enabled                                  = false
@@ -122,9 +133,11 @@ resource "google_sql_database" "app" {
 }
 
 resource "google_sql_user" "app" {
-  name     = "reviewguard"
-  instance = google_sql_database_instance.postgres.name
-  password = random_password.database.result
+  name           = "reviewguard"
+  instance       = google_sql_database_instance.postgres.name
+  password       = random_password.database.result
+  database_roles = ["reviewguard_runtime"]
+  # Bootstrap the migration job and execute it before creating this restricted role.
 }
 
 resource "google_kms_key_ring" "app" {
@@ -161,7 +174,7 @@ resource "google_storage_bucket" "knowledge" {
 }
 
 resource "google_secret_manager_secret" "secrets" {
-  for_each  = toset(["database-url", "google-client-id", "google-client-secret", "openrouter-api-key", "worker-secret", "oauth-state-secret"])
+  for_each  = toset(["database-url", "migration-database-url", "google-client-id", "google-client-secret", "openrouter-api-key", "worker-secret", "oauth-state-secret", "auth-cookie-secret"])
   secret_id = "${local.name}-${each.value}"
   replication {
     auto {}
@@ -200,15 +213,15 @@ resource "google_secret_manager_secret_version" "oauth_state" {
 }
 
 resource "google_secret_manager_secret_iam_member" "api_access" {
-  for_each  = google_secret_manager_secret.secrets
-  secret_id = each.value.id
+  for_each  = toset(["database-url", "google-client-id", "google-client-secret", "openrouter-api-key", "worker-secret", "oauth-state-secret"])
+  secret_id = google_secret_manager_secret.secrets[each.value].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.api.email}"
 }
 
 resource "google_secret_manager_secret_iam_member" "worker_access" {
-  for_each  = google_secret_manager_secret.secrets
-  secret_id = each.value.id
+  for_each  = toset(["worker-secret"])
+  secret_id = google_secret_manager_secret.secrets[each.value].id
   role      = "roles/secretmanager.secretAccessor"
   member    = "serviceAccount:${google_service_account.worker.email}"
 }
@@ -279,7 +292,11 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "AUTH_MODE"
-        value = "identity-platform"
+        value = "identity"
+      }
+      env {
+        name  = "STORAGE_MODE"
+        value = "postgres"
       }
       env {
         name  = "IDENTITY_PROJECT_ID"
@@ -291,11 +308,11 @@ resource "google_cloud_run_v2_service" "api" {
       }
       env {
         name  = "AI_MODE"
-        value = "openrouter"
+        value = "live"
       }
       env {
         name  = "OPENROUTER_MODEL"
-        value = "deepseek/deepseek-v4-pro-0813"
+        value = var.openrouter_model
       }
       env {
         name  = "OPENROUTER_PROVIDER_ALLOWLIST"
@@ -304,6 +321,26 @@ resource "google_cloud_run_v2_service" "api" {
       env {
         name  = "GOOGLE_MODE"
         value = "live"
+      }
+      env {
+        name  = "GOOGLE_PUBSUB_TOPIC"
+        value = google_pubsub_topic.google_reviews.id
+      }
+      env {
+        name  = "AUTOMATION_RELEASE_APPROVED"
+        value = "false"
+      }
+      env {
+        name  = "EMBEDDING_MODE"
+        value = "vertex"
+      }
+      env {
+        name  = "EMBEDDING_MODEL"
+        value = var.embedding_model
+      }
+      env {
+        name  = "EMBEDDING_LOCATION"
+        value = var.embedding_location
       }
       env {
         name  = "TASKS_MODE"
@@ -372,41 +409,24 @@ resource "google_cloud_run_v2_service" "api" {
       }
     }
   }
-  depends_on = [google_project_service.required, google_secret_manager_secret_iam_member.api_access]
+  depends_on = [google_project_service.required, google_secret_manager_secret_iam_member.api_access, google_kms_crypto_key_iam_member.api_encrypt, google_project_iam_member.api_sql_connector, google_project_iam_member.api_identity_reader, google_project_iam_member.api_embeddings]
 }
 
 resource "google_cloud_run_v2_service" "worker" {
   name     = "${local.name}-worker"
   location = var.region
-  ingress  = "INGRESS_TRAFFIC_INTERNAL_LOAD_BALANCER"
+  ingress  = "INGRESS_TRAFFIC_ALL"
   template {
     service_account = google_service_account.worker.email
-    timeout         = "60s"
+    timeout         = "120s"
     scaling {
       min_instance_count = 0
       max_instance_count = 20
-    }
-    vpc_access {
-      egress = "PRIVATE_RANGES_ONLY"
-      network_interfaces {
-        network    = google_compute_network.private.name
-        subnetwork = google_compute_subnetwork.apps.name
-      }
-    }
-    volumes {
-      name = "cloudsql"
-      cloud_sql_instance {
-        instances = [google_sql_database_instance.postgres.connection_name]
-      }
     }
     containers {
       image = var.worker_image
       ports {
         container_port = 4200
-      }
-      volume_mounts {
-        name       = "cloudsql"
-        mount_path = "/cloudsql"
       }
       env {
         name  = "NODE_ENV"
@@ -421,6 +441,10 @@ resource "google_cloud_run_v2_service" "worker" {
         value = "google-oidc"
       }
       env {
+        name  = "WORKER_PUBLIC_URL"
+        value = var.worker_public_url
+      }
+      env {
         name  = "PUSH_SERVICE_ACCOUNT_EMAIL"
         value = google_service_account.push.email
       }
@@ -430,7 +454,6 @@ resource "google_cloud_run_v2_service" "worker" {
       }
       dynamic "env" {
         for_each = {
-          DATABASE_URL           = google_secret_manager_secret_version.database_url.secret
           INTERNAL_WORKER_SECRET = google_secret_manager_secret_version.worker.secret
         }
         content {
@@ -498,7 +521,7 @@ resource "google_project_iam_member" "pubsub_subscription_reader" {
 resource "google_pubsub_subscription" "google_reviews_push" {
   name                       = "${local.name}-google-reviews-push"
   topic                      = google_pubsub_topic.google_reviews.id
-  ack_deadline_seconds       = 60
+  ack_deadline_seconds       = 120
   message_retention_duration = "604800s"
   retry_policy {
     minimum_backoff = "10s"
@@ -512,7 +535,7 @@ resource "google_pubsub_subscription" "google_reviews_push" {
     push_endpoint = "${google_cloud_run_v2_service.worker.uri}/events/google-business"
     oidc_token {
       service_account_email = google_service_account.push.email
-      audience              = google_cloud_run_v2_service.worker.uri
+      audience              = var.worker_public_url
     }
   }
   depends_on = [

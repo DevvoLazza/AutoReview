@@ -27,6 +27,23 @@ variable "worker_image" {
   description = "Immutable worker container image digest."
   type        = string
 }
+variable "web_image" {
+  description = "Immutable dashboard container image digest."
+  type        = string
+}
+variable "openrouter_model" {
+  description = "Reviewed immutable reply-model snapshot; changing it requires evaluation."
+  type        = string
+  default     = "deepseek/deepseek-v4-pro-0813"
+}
+variable "embedding_model" {
+  type    = string
+  default = "gemini-embedding-001"
+}
+variable "embedding_location" {
+  type    = string
+  default = "europe-west4"
+}
 
 variable "web_origin" {
   type = string
