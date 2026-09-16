@@ -1,5 +1,10 @@
 import { Inject, Injectable } from "@nestjs/common";
-import type { RequestPrincipal, ReviewCase, ReviewSnapshot } from "@reviewguard/contracts";
+import type {
+  RequestPrincipal,
+  ReviewCase,
+  ReviewListQuery,
+  ReviewSnapshot,
+} from "@reviewguard/contracts";
 import {
   assertExpectedVersion,
   decideAutomation,
@@ -22,8 +27,8 @@ export class ReviewService {
     private readonly tasks: PublishTaskScheduler,
   ) {}
 
-  list(principal: RequestPrincipal, status?: ReviewCase["status"]): ReviewCase[] {
-    return this.store.listReviews(principal.tenantId, status);
+  list(principal: RequestPrincipal, filters: ReviewListQuery): ReviewCase[] {
+    return this.store.listReviews(principal.tenantId, filters);
   }
 
   get(principal: RequestPrincipal, id: string): ReviewCase {
@@ -72,8 +77,25 @@ export class ReviewService {
       instruction,
       previousDraft: current.activeDraft?.text,
     };
-    const generated = await this.ai.generateDraft(input);
-    const checked = await this.ai.validateDraft({ ...input, draft: generated.value });
+    const { generated, checked } = await (async () => {
+      try {
+        const generatedDraft = await this.ai.generateDraft(input);
+        const checkedDraft = await this.ai.validateDraft({
+          ...input,
+          draft: generatedDraft.value,
+        });
+        return { generated: generatedDraft, checked: checkedDraft };
+      } catch (error) {
+        const latest = this.store.getReview(principal.tenantId, id);
+        if (latest.status === "generating" && latest.version === generating.version) {
+          this.store.transition(principal.tenantId, id, "needs_attention", generating.version);
+        }
+        this.store.appendAudit(principal, "draft.generation_failed", "review", id, {
+          errorCode: error instanceof Error ? error.name : "unknown",
+        });
+        throw error;
+      }
+    })();
     const deterministicFlags = detectHardStops(current.snapshot);
     const validation = {
       ...checked.value,
@@ -189,47 +211,66 @@ export class ReviewService {
     const publishing = this.store.transition(principal.tenantId, id, "publishing", expectedVersion);
     this.store.appendAudit(principal, "review.approved", "review", id);
     this.store.appendAudit(principal, "reply.publish_started", "review", id);
-    const accessToken = await this.currentAccessToken(principal.tenantId);
-    const canonical = await this.google.getReview(accessToken, review.snapshot.googleReviewName);
-    if (canonical.updateTime !== review.snapshot.updateTime || canonical.existingReply) {
-      const attention = this.store.transition(
+    try {
+      const accessToken = await this.currentAccessToken(principal.tenantId);
+      const canonical = await this.google.getReview(accessToken, review.snapshot.googleReviewName);
+      if (canonical.updateTime !== review.snapshot.updateTime || canonical.existingReply) {
+        return this.store.transition(
+          principal.tenantId,
+          id,
+          "needs_attention",
+          publishing.version,
+          {
+            snapshot: canonical,
+            scheduledAt: null,
+            matchedRuleId: null,
+            validation: review.validation
+              ? {
+                  ...review.validation,
+                  valid: false,
+                  riskFlags: [
+                    ...review.validation.riskFlags,
+                    canonical.existingReply ? "existing_reply" : "review_updated",
+                  ],
+                }
+              : null,
+          },
+        );
+      }
+      const published = await this.google.updateReply(
+        accessToken,
+        review.snapshot.googleReviewName,
+        review.activeDraft.text,
+      );
+      const result = this.store.transition(
         principal.tenantId,
         id,
-        "needs_attention",
+        "published",
         publishing.version,
         {
-          snapshot: canonical,
+          publishedAt: published.updateTime,
+          publishedReply: published.comment,
           scheduledAt: null,
-          matchedRuleId: null,
-          validation: review.validation
-            ? {
-                ...review.validation,
-                valid: false,
-                riskFlags: [
-                  ...review.validation.riskFlags,
-                  canonical.existingReply ? "existing_reply" : "review_updated",
-                ],
-              }
-            : null,
         },
       );
-      return attention;
+      this.store.appendAudit(principal, "reply.published", "review", id, {
+        googleUpdateTime: published.updateTime,
+      });
+      this.store.recordPublished(result, manual);
+      return result;
+    } catch (error) {
+      const latest = this.store.getReview(principal.tenantId, id);
+      if (latest.status === "publishing" && latest.version === publishing.version) {
+        this.store.transition(principal.tenantId, id, "needs_attention", publishing.version, {
+          scheduledAt: null,
+          matchedRuleId: null,
+        });
+      }
+      this.store.appendAudit(principal, "reply.publish_failed", "review", id, {
+        errorCode: error instanceof Error ? error.name : "unknown",
+      });
+      throw error;
     }
-    const published = await this.google.updateReply(
-      accessToken,
-      review.snapshot.googleReviewName,
-      review.activeDraft.text,
-    );
-    const result = this.store.transition(principal.tenantId, id, "published", publishing.version, {
-      publishedAt: published.updateTime,
-      publishedReply: published.comment,
-      scheduledAt: null,
-    });
-    this.store.appendAudit(principal, "reply.published", "review", id, {
-      googleUpdateTime: published.updateTime,
-    });
-    this.store.recordPublished(result, manual);
-    return result;
   }
 
   reject(
