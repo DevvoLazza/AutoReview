@@ -195,12 +195,20 @@ export class PostgresRecordRepository implements RecordRepository {
   async assertSafeRuntimeRole(tenantId: string) {
     await this.scoped(tenantId, async (client) => {
       const result = await client.query(
-        "SELECT rolsuper,rolbypassrls,(SELECT count(*)::integer FROM pg_class WHERE relname IN ('runtime_records','runtime_knowledge_chunks') AND relrowsecurity AND relforcerowsecurity) AS protected_tables FROM pg_roles WHERE rolname=current_user",
+        "SELECT rolsuper,rolbypassrls,rolcreaterole,rolcreatedb,(SELECT count(*)::integer FROM pg_class WHERE relname IN ('runtime_records','runtime_knowledge_chunks') AND relrowsecurity AND relforcerowsecurity) AS protected_tables,(SELECT count(*)::integer FROM pg_class WHERE relname IN ('runtime_records','runtime_knowledge_chunks') AND pg_has_role(relowner,'MEMBER')) AS owned_tables FROM pg_roles WHERE rolname=current_user",
       );
       const role = result.rows[0];
-      if (!role || role.rolsuper || role.rolbypassrls || role.protected_tables !== 2)
+      if (
+        !role ||
+        role.rolsuper ||
+        role.rolbypassrls ||
+        role.rolcreaterole ||
+        role.rolcreatedb ||
+        role.owned_tables !== 0 ||
+        role.protected_tables !== 2
+      )
         throw new Error(
-          "Runtime requires a non-superuser, NOBYPASSRLS role and both forced tenant policies",
+          "Runtime requires a restricted, non-owner NOBYPASSRLS role and both forced tenant policies",
         );
     });
   }

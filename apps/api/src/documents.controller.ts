@@ -1,4 +1,5 @@
-import { Worker } from "node:worker_threads";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { Body, Controller, Post } from "@nestjs/common";
 import type { RequestPrincipal } from "@reviewguard/contracts";
 import { DomainError } from "@reviewguard/core";
@@ -30,13 +31,24 @@ export async function extractDocument(filename: string, base64: string): Promise
       const path = import.meta.url.endsWith(".ts")
         ? "./document-worker.ts"
         : "./document-worker.js";
-      const worker = new Worker(new URL(path, import.meta.url), {
-        workerData: { extension, base64 },
-        execArgv: [],
-        resourceLimits: { maxOldGenerationSizeMb: 128 },
-      });
+      const worker = spawn(
+        process.execPath,
+        ["--max-old-space-size=128", fileURLToPath(new URL(path, import.meta.url))],
+        {
+          stdio: ["ignore", "ignore", "ignore", "ipc"],
+          windowsHide: true,
+          env: {
+            NODE_ENV: process.env.NODE_ENV,
+            SystemRoot: process.env.SystemRoot,
+            PATH: process.env.PATH,
+            TEMP: process.env.TEMP,
+            TMP: process.env.TMP,
+          },
+        },
+      );
+      let settled = false;
       const timeout = setTimeout(() => {
-        void worker.terminate();
+        finish();
         reject(
           new DomainError(
             "Estrazione scaduta. Usa un documento più semplice o incolla il testo.",
@@ -46,8 +58,9 @@ export async function extractDocument(filename: string, base64: string): Promise
         );
       }, 15_000);
       const finish = () => {
+        settled = true;
         clearTimeout(timeout);
-        void worker.terminate();
+        worker.kill();
       };
       worker.once("message", (value: { text?: string; error?: boolean }) => {
         finish();
@@ -65,12 +78,13 @@ export async function extractDocument(filename: string, base64: string): Promise
         finish();
         reject(new DomainError("Estrazione non riuscita", "document_parse_failed", 400));
       });
-      worker.once("exit", (code) => {
-        if (code !== 0) {
+      worker.once("exit", () => {
+        if (!settled) {
           finish();
           reject(new DomainError("Documento troppo complesso", "document_parse_failed", 400));
         }
       });
+      worker.send({ extension, base64 });
     });
   }
   text = text.replaceAll("\u0000", "").trim();

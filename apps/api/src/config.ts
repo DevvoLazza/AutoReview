@@ -35,8 +35,10 @@ export function assertStartupConfiguration(env: NodeJS.ProcessEnv = process.env)
   }
   for (const name of ["GOOGLE_REDIRECT_URI", "WEB_ORIGIN", "WORKER_PUBLIC_URL"])
     if (!env[name]?.startsWith("https://")) throw new Error(`${name} requires HTTPS`);
-  if (env.OPENROUTER_BASE_URL && !env.OPENROUTER_BASE_URL.startsWith("https://")) throw new Error("OPENROUTER_BASE_URL requires HTTPS");
-  if (!env.OPENROUTER_PROVIDER_ALLOWLIST?.split(",").some(value => value.trim())) throw new Error("A non-empty provider allowlist is required");
+  if (env.OPENROUTER_BASE_URL && !env.OPENROUTER_BASE_URL.startsWith("https://"))
+    throw new Error("OPENROUTER_BASE_URL requires HTTPS");
+  if (!env.OPENROUTER_PROVIDER_ALLOWLIST?.split(",").some((value) => value.trim()))
+    throw new Error("A non-empty provider allowlist is required");
   if ((env.OAUTH_STATE_SECRET?.length ?? 0) < 32 || (env.INTERNAL_WORKER_SECRET?.length ?? 0) < 32)
     throw new Error("Worker/OAuth secrets must contain at least 32 characters");
 }

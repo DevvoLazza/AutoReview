@@ -52,6 +52,10 @@ export function createWorker(options: WorkerOptions = {}): FastifyInstance {
     await verifyGoogleOidc(request);
     return callApi(fetchImpl, "/internal/reviews/purge-expired-google-content", {});
   });
+  worker.post("/tasks/retry-notifications", async (request) => {
+    await verifyGoogleOidc(request);
+    return callApi(fetchImpl, "/internal/reviews/retry-notifications", {});
+  });
 
   worker.setErrorHandler((error, _request, reply) => {
     const normalized = error instanceof Error ? error : new Error("Unknown worker error");

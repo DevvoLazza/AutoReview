@@ -94,7 +94,7 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
   async listReviews(tenantId: string, status?: ReviewCase["status"]): Promise<ReviewCase[]> {
     return (await this.values<ReviewCase>(tenantId, "review"))
       .filter((review) => !status || review.status === status)
-      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt) || b.id.localeCompare(a.id));
   }
   async getReview(tenantId: string, id: string): Promise<ReviewCase> {
     const entry = await this.repository.get<ReviewCase>(tenantId, "review", id);
@@ -108,7 +108,11 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       ) ?? null
     );
   }
-  async createReview(tenantId: string, snapshot: ReviewSnapshot): Promise<ReviewCase> {
+  async createReview(
+    tenantId: string,
+    snapshot: ReviewSnapshot,
+    updatedEvent = false,
+  ): Promise<ReviewCase> {
     const id = deterministicUuid(snapshot.googleReviewName);
     const existing =
       (await this.repository.get<ReviewCase>(tenantId, "review", id)) ??
@@ -118,10 +122,15 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       ).find((entry) => entry.value.snapshot.googleReviewName === snapshot.googleReviewName);
     if (existing) {
       if (existing.value.snapshot.updateTime === snapshot.updateTime) return existing.value;
+      const ownPublishedReply =
+        existing.value.status === "published" &&
+        existing.value.publishedReply === snapshot.existingReply &&
+        existing.value.snapshot.comment === snapshot.comment &&
+        existing.value.snapshot.starRating === snapshot.starRating;
       const updated = {
         ...existing.value,
         snapshot,
-        status: "needs_attention" as const,
+        status: ownPublishedReply ? ("published" as const) : ("needs_attention" as const),
         activeDraft: null,
         validation: null,
         scheduledAt: null,
@@ -129,7 +138,7 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
         version: existing.value.version + 1,
         updatedAt: new Date().toISOString(),
         contentExpiresAt: expiry(),
-        wasUpdated: true,
+        wasUpdated: ownPublishedReply ? existing.value.wasUpdated : true,
       };
       if (
         !(await this.repository.put(
@@ -160,7 +169,7 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       createdAt: now,
       updatedAt: now,
       contentExpiresAt: expiry(),
-      wasUpdated: false,
+      wasUpdated: updatedEvent || snapshot.createTime !== snapshot.updateTime,
     };
     if (!(await this.repository.put(tenantId, "review", id, review, null, expiry())))
       return this.getReview(tenantId, id);
@@ -422,6 +431,13 @@ export class MemoryStore implements OnModuleInit, OnModuleDestroy {
       entry?.version ?? null,
     );
     return { registered: true as const };
+  }
+  async removeDeviceToken(tenantId: string, token: string) {
+    await this.repository.remove(
+      tenantId,
+      "device",
+      createHash("sha256").update(token).digest("hex"),
+    );
   }
   async manualApprovalCount(tenantId: string, locationId: string) {
     return (

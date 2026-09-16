@@ -37,7 +37,8 @@ export class OpenRouterReplyProvider implements ReplyModelProvider {
     if (!options.apiKey) {
       throw new DomainError("OPENROUTER_API_KEY is required", "ai_not_configured", 503);
     }
-    if (!options.providerAllowlist?.length) throw new DomainError("A verified provider allowlist is required", "ai_not_configured", 503);
+    if (!options.providerAllowlist?.length)
+      throw new DomainError("A verified provider allowlist is required", "ai_not_configured", 503);
     this.baseUrl = (options.baseUrl ?? "https://openrouter.ai/api/v1").replace(/\/$/, "");
     this.model = options.model ?? "deepseek/deepseek-v4-pro-0813";
     this.request = options.fetchImpl ?? fetch;

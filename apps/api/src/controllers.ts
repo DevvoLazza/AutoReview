@@ -37,6 +37,7 @@ import { Principal, Public, Roles } from "./auth.js";
 import { DEMO_SNAPSHOTS, DEMO_TENANT_ID, DEMO_USER_ID } from "./demo.js";
 import { IntegrationService } from "./integration.service.js";
 import { KnowledgeService } from "./knowledge.service.js";
+import { ReviewNotificationService } from "./notifications.js";
 import { GOOGLE_GATEWAY } from "./providers.js";
 import { ReviewService } from "./review.service.js";
 import { MemoryStore } from "./store.js";
@@ -60,10 +61,23 @@ export class ReviewsController {
   @Get()
   async list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
     const parsed = reviewListQuerySchema.parse(query);
-    const data = (await this.reviews.list(principal, parsed.status))
-      .filter((review) => !parsed.locationId || review.snapshot.locationId === parsed.locationId)
-      .slice(0, parsed.limit);
-    return { data, meta: { limit: parsed.limit } };
+    const matches = (await this.reviews.list(principal, parsed.status)).filter(
+      (review) => !parsed.locationId || review.snapshot.locationId === parsed.locationId,
+    );
+    const position = parsed.cursor
+      ? matches.findIndex((review) => review.id === parsed.cursor)
+      : -1;
+    if (parsed.cursor && position < 0)
+      throw new BadRequestException("Pagina scaduta: aggiorna l’inbox");
+    const data = matches.slice(position + 1, position + 1 + parsed.limit);
+    return {
+      data,
+      meta: {
+        limit: parsed.limit,
+        total: matches.length,
+        nextCursor: position + 1 + data.length < matches.length ? data.at(-1)?.id : null,
+      },
+    };
   }
 
   @Get(":id")
@@ -436,10 +450,14 @@ export class GoogleWebhookController {
     try {
       const token = await currentAccessToken(this.store, this.google, principal.tenantId);
       const snapshot = await this.google.getReview(token, notification.reviewName);
-      const review = await this.reviews.ingestAndGenerate(principal, {
-        ...snapshot,
-        locationId: location?.id ?? snapshot.locationId,
-      });
+      const review = await this.reviews.ingestAndGenerate(
+        principal,
+        {
+          ...snapshot,
+          locationId: location?.id ?? snapshot.locationId,
+        },
+        notification.notificationType === "UPDATED_REVIEW",
+      );
       await this.store.completeEvent(principal.tenantId, envelope.message.messageId);
       return { accepted: true, reviewId: review.id };
     } catch (error) {
@@ -498,7 +516,15 @@ export class InternalReviewsController {
   constructor(
     private readonly reviews: ReviewService,
     private readonly store: MemoryStore,
+    private readonly notifications: ReviewNotificationService,
   ) {}
+
+  @Post("retry-notifications")
+  @Public()
+  retryNotifications(@Headers("x-reviewguard-worker-secret") suppliedSecret: string | undefined) {
+    verifyWorkerSecret(suppliedSecret);
+    return this.notifications.retryPending(process.env.GOOGLE_WEBHOOK_TENANT_ID ?? DEMO_TENANT_ID);
+  }
 
   @Post("purge-expired-google-content")
   @Public()

@@ -35,8 +35,9 @@ export class ReviewService {
   async ingestAndGenerate(
     principal: RequestPrincipal,
     snapshot: ReviewSnapshot,
+    updatedEvent = false,
   ): Promise<ReviewCase> {
-    let review = await this.store.createReview(principal.tenantId, snapshot);
+    let review = await this.store.createReview(principal.tenantId, snapshot, updatedEvent);
     if (
       snapshot.existingReply ||
       ["pending_approval", "scheduled_auto", "published", "publishing"].includes(review.status)
