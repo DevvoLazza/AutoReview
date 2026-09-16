@@ -1,32 +1,74 @@
 import * as Notifications from "expo-notifications";
-import { Stack, useRouter } from "expo-router";
+import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
-import { useEffect } from "react";
-import { Platform } from "react-native";
-import { registerDeviceToken } from "@/lib/api";
-import { registerForPushNotifications } from "@/lib/notifications";
+import { useEffect, useState } from "react";
+import { ActivityIndicator, View } from "react-native";
+import { accessToken, demoMode, restoreSession, subscribeSession } from "@/lib/session";
 import { colors } from "@/lib/theme";
 
 export default function RootLayout() {
   const router = useRouter();
+  const segments: readonly string[] = useSegments();
+  const [ready, setReady] = useState(false);
+  const [authenticated, setAuthenticated] = useState(demoMode);
+  const [pendingRoute, setPendingRoute] = useState<string | null>(null);
   useEffect(() => {
-    registerForPushNotifications()
-      .then((token) => {
-        if (token && (Platform.OS === "ios" || Platform.OS === "android")) {
-          return registerDeviceToken(token, Platform.OS);
-        }
-      })
-      .catch(() => undefined);
+    const refresh = async () => {
+      try {
+        await restoreSession();
+        setAuthenticated(demoMode || Boolean(await accessToken()));
+      } catch {
+        setAuthenticated(false);
+      } finally {
+        setReady(true);
+      }
+    };
+    const unsubscribe = subscribeSession(() => {
+      void restoreSession().then((value) => setAuthenticated(demoMode || Boolean(value)));
+    });
+    void refresh();
+    return unsubscribe;
+  }, []);
+  useEffect(() => {
+    if (!ready) return;
+    if (!authenticated && segments[0] !== "login") {
+      if (segments[0] === "reviews" && /^[0-9a-f-]{36}$/i.test(segments[1] ?? ""))
+        setPendingRoute(`/reviews/${segments[1]}`);
+      router.replace("/login");
+    } else if (authenticated && pendingRoute) {
+      router.replace(pendingRoute as never);
+      setPendingRoute(null);
+      void Notifications.clearLastNotificationResponseAsync();
+    } else if (authenticated && segments[0] === "login") router.replace("/");
+  }, [ready, authenticated, segments, pendingRoute, router]);
+  useEffect(() => {
+    const accept = (route: unknown) => {
+      if (typeof route === "string" && /^\/reviews\/[0-9a-f-]{36}$/i.test(route))
+        setPendingRoute(route);
+    };
     const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
       const route = response.notification.request.content.data?.route;
-      if (typeof route === "string" && route.startsWith("/reviews/")) router.push(route as never);
+      accept(route);
     });
     Notifications.getLastNotificationResponseAsync().then((response) => {
       const route = response?.notification.request.content.data?.route;
-      if (typeof route === "string" && route.startsWith("/reviews/")) router.push(route as never);
+      accept(route);
     });
     return () => subscription.remove();
-  }, [router]);
+  }, []);
+  if (!ready)
+    return (
+      <View
+        style={{
+          flex: 1,
+          alignItems: "center",
+          justifyContent: "center",
+          backgroundColor: colors.background,
+        }}
+      >
+        <ActivityIndicator accessibilityLabel="Ripristino sessione" color={colors.green} />
+      </View>
+    );
 
   return (
     <>
@@ -40,6 +82,7 @@ export default function RootLayout() {
         }}
       >
         <Stack.Screen name="index" options={{ headerShown: false }} />
+        <Stack.Screen name="login" options={{ headerShown: false }} />
         <Stack.Screen
           name="reviews/[id]"
           options={{ title: "Approva risposta", headerBackTitle: "Inbox" }}

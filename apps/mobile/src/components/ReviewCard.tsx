@@ -28,7 +28,9 @@ export function ReviewCard({ review }: { review: ReviewCase }) {
         <View style={styles.body}>
           <View style={styles.meta}>
             <Text style={styles.name}>{review.snapshot.reviewerDisplayName}</Text>
-            <Text style={styles.time}>oggi</Text>
+            <Text style={styles.time}>
+              {new Date(review.snapshot.createTime).toLocaleDateString("it-IT")}
+            </Text>
           </View>
           <Text style={styles.comment} numberOfLines={2}>
             {review.snapshot.comment || "Recensione senza testo"}
