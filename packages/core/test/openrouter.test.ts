@@ -64,7 +64,7 @@ describe("OpenRouter safety envelope", () => {
       zdr: true,
       data_collection: "deny",
       require_parameters: true,
-      order: ["verified-provider"],
+      only: ["verified-provider"],
     });
   });
 });

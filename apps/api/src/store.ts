@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Injectable } from "@nestjs/common";
+import { Injectable, type OnModuleDestroy, type OnModuleInit } from "@nestjs/common";
 import type {
   AuditEvent,
   AutomationRule,
@@ -8,59 +8,130 @@ import type {
   ReviewCase,
   ReviewSnapshot,
 } from "@reviewguard/contracts";
-import type { GoogleTokens } from "@reviewguard/core";
-import { NotFoundError, transitionReview } from "@reviewguard/core";
-import { DEMO_KNOWLEDGE, DEMO_REVIEWS, DEMO_RULES } from "./demo.js";
+import {
+  type GoogleTokens,
+  NotFoundError,
+  transitionReview,
+  VersionConflictError,
+} from "@reviewguard/core";
+import {
+  MemoryRecordRepository,
+  PostgresRecordRepository,
+  type RecordRepository,
+} from "@reviewguard/database";
+import { DEMO_KNOWLEDGE, DEMO_REVIEWS, DEMO_RULES, DEMO_TENANT_ID } from "./demo.js";
+import { TokenVault } from "./token-vault.js";
 
+export type Location = {
+  id: string;
+  googleAccountName: string;
+  googleLocationName: string;
+  displayName: string;
+  active: boolean;
+  defaultLanguage: string;
+  tone: string;
+};
+export type Settings = { killSwitch: boolean; defaultLanguage: string; tone: string };
+export type StoredGoogleTokens = GoogleTokens & { expiresAt: number };
+
+// The injection name is retained for compatibility; STORAGE_MODE selects the repository.
 @Injectable()
-export class MemoryStore {
-  private readonly reviews = new Map(
-    DEMO_REVIEWS.map((review) => [review.id, structuredClone(review)]),
-  );
-  private readonly knowledge = new Map(
-    DEMO_KNOWLEDGE.map((entry) => [entry.id, structuredClone(entry)]),
-  );
-  private readonly rules = new Map(DEMO_RULES.map((rule) => [rule.id, structuredClone(rule)]));
-  private readonly audit: AuditEvent[] = [];
-  private readonly processedEvents = new Set<string>();
-  private readonly googleTokens = new Map<string, GoogleTokens & { expiresAt: number }>();
-  private readonly deviceTokens = new Map<
-    string,
-    { tenantId: string; userId: string; platform: string; provider: string }
-  >();
-  private readonly manualApprovalsByLocation = new Map<string, number>();
-  private readonly publishedTodayByRule = new Map<string, { date: string; count: number }>();
-
-  listReviews(tenantId: string, status?: ReviewCase["status"]): ReviewCase[] {
-    return [...this.reviews.values()]
-      .filter((review) => review.tenantId === tenantId && (!status || review.status === status))
-      .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
-      .map((review) => structuredClone(review));
+export class MemoryStore implements OnModuleInit, OnModuleDestroy {
+  readonly repository: RecordRepository;
+  private readonly vault: TokenVault;
+  constructor() {
+    const persistent = process.env.STORAGE_MODE === "postgres";
+    if (process.env.NODE_ENV === "production" && (!persistent || !process.env.TOKEN_ENCRYPTION_KEY))
+      throw new Error("Production requires PostgreSQL and TOKEN_ENCRYPTION_KEY");
+    if (persistent && !process.env.DATABASE_URL) throw new Error("DATABASE_URL is required");
+    this.repository = persistent
+      ? new PostgresRecordRepository(process.env.DATABASE_URL as string)
+      : new MemoryRecordRepository();
+    this.vault = new TokenVault(process.env.TOKEN_ENCRYPTION_KEY);
   }
-
-  getReview(tenantId: string, id: string): ReviewCase {
-    const review = this.reviews.get(id);
-    if (!review || review.tenantId !== tenantId) throw new NotFoundError("Review", id);
-    return structuredClone(review);
+  async onModuleInit() {
+    if ((process.env.AUTH_MODE ?? "demo") === "demo" && process.env.NODE_ENV !== "production") {
+      for (const [kind, entries] of [
+        ["review", DEMO_REVIEWS],
+        ["knowledge", DEMO_KNOWLEDGE],
+        ["rule", DEMO_RULES],
+      ] as const) {
+        for (const entry of entries)
+          await this.repository.put(entry.tenantId, kind, entry.id, entry, null);
+      }
+      await this.upsertLocation(DEMO_TENANT_ID, {
+        id: DEMO_REVIEWS[0]!.snapshot.locationId,
+        googleAccountName: "accounts/demo",
+        googleLocationName: `locations/${DEMO_REVIEWS[0]!.snapshot.locationId}`,
+        displayName: "Sede dimostrativa",
+        active: true,
+        defaultLanguage: "it",
+        tone: "professionale, umano e conciso",
+      });
+    }
   }
-
-  findReviewByGoogleName(tenantId: string, name: string): ReviewCase | null {
-    const review = [...this.reviews.values()].find(
-      (candidate) =>
-        candidate.tenantId === tenantId && candidate.snapshot.googleReviewName === name,
+  async onModuleDestroy() {
+    await this.repository.close();
+  }
+  private async values<T>(tenantId: string, kind: string): Promise<T[]> {
+    return (await this.repository.list<T>(tenantId, kind)).map((entry) => entry.value);
+  }
+  async listReviews(tenantId: string, status?: ReviewCase["status"]): Promise<ReviewCase[]> {
+    return (await this.values<ReviewCase>(tenantId, "review"))
+      .filter((review) => !status || review.status === status)
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt));
+  }
+  async getReview(tenantId: string, id: string): Promise<ReviewCase> {
+    const entry = await this.repository.get<ReviewCase>(tenantId, "review", id);
+    if (!entry) throw new NotFoundError("Review", id);
+    return entry.value;
+  }
+  async findReviewByGoogleName(tenantId: string, name: string) {
+    return (
+      (await this.listReviews(tenantId)).find(
+        (entry) => entry.snapshot.googleReviewName === name,
+      ) ?? null
     );
-    return review ? structuredClone(review) : null;
   }
-
-  createReview(tenantId: string, snapshot: ReviewSnapshot): ReviewCase {
-    const existing = this.findReviewByGoogleName(tenantId, snapshot.googleReviewName);
-    if (existing) return existing;
+  async createReview(tenantId: string, snapshot: ReviewSnapshot): Promise<ReviewCase> {
+    const id = deterministicUuid(snapshot.googleReviewName);
+    const existing =
+      (await this.repository.get<ReviewCase>(tenantId, "review", id)) ??
+      (await this.repository.list<ReviewCase>(tenantId, "review")).find(
+        (entry) => entry.value.snapshot.googleReviewName === snapshot.googleReviewName,
+      );
+    if (existing) {
+      if (existing.value.snapshot.updateTime === snapshot.updateTime) return existing.value;
+      const updated = {
+        ...existing.value,
+        snapshot,
+        status: "needs_attention" as const,
+        activeDraft: null,
+        validation: null,
+        scheduledAt: null,
+        matchedRuleId: null,
+        version: existing.value.version + 1,
+        updatedAt: new Date().toISOString(),
+      };
+      if (
+        !(await this.repository.put(
+          tenantId,
+          "review",
+          existing.id,
+          updated,
+          existing.version,
+          expiry(),
+        ))
+      )
+        throw new VersionConflictError(existing.version, existing.version + 1);
+      return updated;
+    }
     const now = new Date().toISOString();
     const review: ReviewCase = {
-      id: crypto.randomUUID(),
+      id,
       tenantId,
       snapshot,
-      status: "received",
+      status: snapshot.existingReply ? "needs_attention" : "received",
       version: 1,
       activeDraft: null,
       validation: null,
@@ -71,40 +142,42 @@ export class MemoryStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.reviews.set(review.id, review);
-    return structuredClone(review);
+    if (!(await this.repository.put(tenantId, "review", id, review, null, expiry())))
+      return this.getReview(tenantId, id);
+    return review;
   }
-
-  saveReview(review: ReviewCase): ReviewCase {
-    this.reviews.set(review.id, structuredClone(review));
-    return structuredClone(review);
+  async saveReview(review: ReviewCase, expectedVersion = review.version - 1): Promise<ReviewCase> {
+    const record = await this.repository.get<ReviewCase>(review.tenantId, "review", review.id);
+    if (!record) throw new NotFoundError("Review", review.id);
+    if (
+      record.value.version !== expectedVersion ||
+      !(await this.repository.put(review.tenantId, "review", review.id, review, record.version))
+    )
+      throw new VersionConflictError(expectedVersion, record.value.version);
+    return review;
   }
-
-  transition(
+  async transition(
     tenantId: string,
     id: string,
     status: ReviewCase["status"],
     expectedVersion: number,
     patch: Partial<ReviewCase> = {},
-  ): ReviewCase {
+  ) {
     return this.saveReview(
-      transitionReview(this.getReview(tenantId, id), status, expectedVersion, patch),
+      transitionReview(await this.getReview(tenantId, id), status, expectedVersion, patch),
+      expectedVersion,
     );
   }
-
-  listKnowledge(tenantId: string): KnowledgeSource[] {
-    return [...this.knowledge.values()]
-      .filter((entry) => entry.tenantId === tenantId)
-      .map((entry) => structuredClone(entry));
+  async listKnowledge(tenantId: string) {
+    return this.values<KnowledgeSource>(tenantId, "knowledge");
   }
-
-  createKnowledge(
+  async createKnowledge(
     principal: RequestPrincipal,
     input: Omit<
       KnowledgeSource,
       "id" | "tenantId" | "status" | "version" | "authorId" | "sha256" | "createdAt" | "updatedAt"
     >,
-  ): KnowledgeSource {
+  ): Promise<KnowledgeSource> {
     const now = new Date().toISOString();
     const entry: KnowledgeSource = {
       ...input,
@@ -117,30 +190,40 @@ export class MemoryStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.knowledge.set(entry.id, entry);
-    return structuredClone(entry);
+    await this.repository.put(principal.tenantId, "knowledge", entry.id, entry, null);
+    return entry;
   }
-
-  approveKnowledge(tenantId: string, id: string): KnowledgeSource {
-    const entry = this.knowledge.get(id);
-    if (!entry || entry.tenantId !== tenantId) throw new NotFoundError("Knowledge source", id);
-    const approved = {
-      ...entry,
-      status: "approved" as const,
-      version: entry.version + 1,
+  async approveKnowledge(tenantId: string, id: string) {
+    return this.changeKnowledge(tenantId, id, "approved");
+  }
+  async changeKnowledge(
+    tenantId: string,
+    id: string,
+    status: KnowledgeSource["status"],
+    patch: Partial<KnowledgeSource> = {},
+  ) {
+    const entry = await this.repository.get<KnowledgeSource>(tenantId, "knowledge", id);
+    if (!entry) throw new NotFoundError("Knowledge source", id);
+    const value = {
+      ...entry.value,
+      ...patch,
+      id,
+      tenantId,
+      status,
+      version: entry.value.version + 1,
+      sha256: createHash("sha256")
+        .update(patch.content ?? entry.value.content)
+        .digest("hex"),
       updatedAt: new Date().toISOString(),
     };
-    this.knowledge.set(id, approved);
-    return structuredClone(approved);
+    if (!(await this.repository.put(tenantId, "knowledge", id, value, entry.version)))
+      throw new VersionConflictError(entry.version, entry.version + 1);
+    return value;
   }
-
-  listRules(tenantId: string): AutomationRule[] {
-    return [...this.rules.values()]
-      .filter((rule) => rule.tenantId === tenantId)
-      .map((rule) => structuredClone(rule));
+  async listRules(tenantId: string) {
+    return this.values<AutomationRule>(tenantId, "rule");
   }
-
-  createRule(
+  async createRule(
     tenantId: string,
     input: Omit<
       AutomationRule,
@@ -152,7 +235,7 @@ export class MemoryStore {
       | "createdAt"
       | "updatedAt"
     >,
-  ): AutomationRule {
+  ) {
     const now = new Date().toISOString();
     const rule: AutomationRule = {
       ...input,
@@ -165,34 +248,35 @@ export class MemoryStore {
       createdAt: now,
       updatedAt: now,
     };
-    this.rules.set(rule.id, rule);
-    return structuredClone(rule);
+    await this.repository.put(tenantId, "rule", rule.id, rule, null);
+    return rule;
   }
-
-  enableRule(principal: RequestPrincipal, id: string): AutomationRule {
-    const rule = this.rules.get(id);
-    if (!rule || rule.tenantId !== principal.tenantId)
-      throw new NotFoundError("Automation rule", id);
+  async enableRule(principal: RequestPrincipal, id: string) {
+    return this.setRuleEnabled(principal, id, true);
+  }
+  async setRuleEnabled(principal: RequestPrincipal, id: string, enabled: boolean) {
+    const entry = await this.repository.get<AutomationRule>(principal.tenantId, "rule", id);
+    if (!entry) throw new NotFoundError("Automation rule", id);
     const now = new Date().toISOString();
-    const enabled = {
-      ...rule,
-      enabled: true,
-      consentVersion: "automation-consent-v1",
-      consentedBy: principal.userId,
-      consentedAt: now,
+    const value = {
+      ...entry.value,
+      enabled,
+      consentVersion: enabled ? "automation-consent-v1" : null,
+      consentedBy: enabled ? principal.userId : null,
+      consentedAt: enabled ? now : null,
       updatedAt: now,
     };
-    this.rules.set(id, enabled);
-    return structuredClone(enabled);
+    if (!(await this.repository.put(principal.tenantId, "rule", id, value, entry.version)))
+      throw new VersionConflictError(entry.version, entry.version + 1);
+    return value;
   }
-
-  appendAudit(
+  async appendAudit(
     principal: Pick<RequestPrincipal, "tenantId" | "userId">,
     action: AuditEvent["action"],
     entityType: string,
     entityId: string,
     metadata: Record<string, unknown> = {},
-  ): AuditEvent {
+  ) {
     const event: AuditEvent = {
       id: crypto.randomUUID(),
       tenantId: principal.tenantId,
@@ -203,81 +287,202 @@ export class MemoryStore {
       metadata,
       createdAt: new Date().toISOString(),
     };
-    this.audit.push(event);
-    return structuredClone(event);
+    await this.repository.put(principal.tenantId, "audit", event.id, event, null);
+    return event;
   }
-
-  listAudit(tenantId: string): AuditEvent[] {
-    return this.audit
-      .filter((event) => event.tenantId === tenantId)
-      .map((event) => structuredClone(event))
-      .reverse();
-  }
-
-  claimEvent(messageId: string): boolean {
-    if (this.processedEvents.has(messageId)) return false;
-    this.processedEvents.add(messageId);
-    return true;
-  }
-
-  setGoogleTokens(tenantId: string, tokens: GoogleTokens): void {
-    this.googleTokens.set(tenantId, {
-      ...tokens,
-      expiresAt: Date.now() + Math.max(60, tokens.expiresIn - 60) * 1_000,
-    });
-  }
-
-  getGoogleTokens(tenantId: string): (GoogleTokens & { expiresAt: number }) | null {
-    return this.googleTokens.get(tenantId) ?? null;
-  }
-
-  listDeviceRegistrations(tenantId: string): Array<{ token: string; userId: string }> {
-    return [...this.deviceTokens.entries()]
-      .filter(([, registration]) => registration.tenantId === tenantId)
-      .map(([token, registration]) => ({ token, userId: registration.userId }));
-  }
-
-  registerDevice(
-    principal: RequestPrincipal,
-    input: { token: string; platform: string; provider: string },
-  ): { registered: true } {
-    this.deviceTokens.set(input.token, {
-      tenantId: principal.tenantId,
-      userId: principal.userId,
-      platform: input.platform,
-      provider: input.provider,
-    });
-    return { registered: true };
-  }
-
-  manualApprovalCount(locationId: string): number {
-    return this.manualApprovalsByLocation.get(locationId) ?? 0;
-  }
-
-  sentTodayByRule(ruleIds: readonly string[]): Record<string, number> {
-    const today = new Date().toISOString().slice(0, 10);
-    return Object.fromEntries(
-      ruleIds.map((ruleId) => {
-        const current = this.publishedTodayByRule.get(ruleId);
-        return [ruleId, current?.date === today ? current.count : 0];
-      }),
+  async listAudit(tenantId: string) {
+    return (await this.values<AuditEvent>(tenantId, "audit")).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt),
     );
   }
-
-  recordPublished(review: ReviewCase, manual: boolean): void {
-    if (manual) {
-      this.manualApprovalsByLocation.set(
-        review.snapshot.locationId,
-        this.manualApprovalCount(review.snapshot.locationId) + 1,
-      );
-    }
-    if (review.matchedRuleId) {
-      const today = new Date().toISOString().slice(0, 10);
-      const current = this.publishedTodayByRule.get(review.matchedRuleId);
-      this.publishedTodayByRule.set(review.matchedRuleId, {
-        date: today,
-        count: current?.date === today ? current.count + 1 : 1,
-      });
-    }
+  async claimEvent(tenantId: string, id: string): Promise<boolean> {
+    const entry = await this.repository.get<{ completed: boolean; leaseUntil: number }>(
+      tenantId,
+      "event",
+      id,
+    );
+    if (entry?.value.completed) return false;
+    if (entry && entry.value.leaseUntil > Date.now())
+      throw new VersionConflictError(0, entry.version);
+    return Boolean(
+      await this.repository.put(
+        tenantId,
+        "event",
+        id,
+        { completed: false, leaseUntil: Date.now() + 120_000 },
+        entry?.version ?? null,
+        expiry(2),
+      ),
+    );
   }
+  async completeEvent(tenantId: string, id: string) {
+    const entry = await this.repository.get(tenantId, "event", id);
+    if (entry)
+      await this.repository.put(
+        tenantId,
+        "event",
+        id,
+        { completed: true, leaseUntil: 0 },
+        entry.version,
+      );
+  }
+  async releaseEvent(tenantId: string, id: string) {
+    await this.repository.remove(tenantId, "event", id);
+  }
+  async setGoogleTokens(tenantId: string, tokens: GoogleTokens) {
+    const current = await this.getGoogleTokens(tenantId);
+    const value = {
+      ...tokens,
+      refreshToken: tokens.refreshToken ?? current?.refreshToken ?? null,
+      expiresAt: Date.now() + Math.max(60, tokens.expiresIn - 60) * 1_000,
+    };
+    const record = await this.repository.get(tenantId, "google_tokens", "connection");
+    if (
+      !(await this.repository.put(
+        tenantId,
+        "google_tokens",
+        "connection",
+        { encrypted: this.vault.seal(value, tenantId) },
+        record?.version ?? null,
+      ))
+    )
+      throw new VersionConflictError(record?.version ?? 0, (record?.version ?? 0) + 1);
+  }
+  async getGoogleTokens(tenantId: string): Promise<StoredGoogleTokens | null> {
+    const record = await this.repository.get<{ encrypted: string }>(
+      tenantId,
+      "google_tokens",
+      "connection",
+    );
+    return record ? this.vault.open<StoredGoogleTokens>(record.value.encrypted, tenantId) : null;
+  }
+  async clearGoogleTokens(tenantId: string) {
+    await this.repository.remove(tenantId, "google_tokens", "connection");
+  }
+  async listDeviceRegistrations(tenantId: string) {
+    return this.values<{ token: string; userId: string }>(tenantId, "device");
+  }
+  async registerDevice(
+    principal: RequestPrincipal,
+    input: { token: string; platform: string; provider: string },
+  ) {
+    const id = createHash("sha256").update(input.token).digest("hex");
+    const entry = await this.repository.get(principal.tenantId, "device", id);
+    await this.repository.put(
+      principal.tenantId,
+      "device",
+      id,
+      { ...input, userId: principal.userId },
+      entry?.version ?? null,
+    );
+    return { registered: true as const };
+  }
+  async manualApprovalCount(tenantId: string, locationId: string) {
+    return (
+      (await this.repository.get<{ count: number }>(tenantId, "counter", `manual/${locationId}`))
+        ?.value.count ?? 0
+    );
+  }
+  async sentTodayByRule(tenantId: string, ruleIds: readonly string[]) {
+    return Object.fromEntries(
+      await Promise.all(
+        ruleIds.map(async (id) => [
+          id,
+          (
+            await this.repository.get<{ count: number }>(
+              tenantId,
+              "counter",
+              `rule/${id}/${new Date().toISOString().slice(0, 10)}`,
+            )
+          )?.value.count ?? 0,
+        ]),
+      ),
+    );
+  }
+  async increment(tenantId: string, id: string) {
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const entry = await this.repository.get<{ count: number }>(tenantId, "counter", id);
+      if (
+        await this.repository.put(
+          tenantId,
+          "counter",
+          id,
+          { count: (entry?.value.count ?? 0) + 1 },
+          entry?.version ?? null,
+        )
+      )
+        return;
+    }
+    throw new Error("Counter contention");
+  }
+  async recordPublished(review: ReviewCase, manual: boolean) {
+    if (manual) await this.increment(review.tenantId, `manual/${review.snapshot.locationId}`);
+  }
+  async reserveRuleSlot(tenantId: string, ruleId: string, limit: number): Promise<boolean> {
+    const id = `rule/${ruleId}/${new Date().toISOString().slice(0, 10)}`;
+    for (let attempt = 0; attempt < 10; attempt++) {
+      const entry = await this.repository.get<{ count: number }>(tenantId, "counter", id);
+      const count = entry?.value.count ?? 0;
+      if (count >= limit) return false;
+      if (
+        await this.repository.put(
+          tenantId,
+          "counter",
+          id,
+          { count: count + 1 },
+          entry?.version ?? null,
+        )
+      )
+        return true;
+    }
+    return false;
+  }
+  async getSettings(tenantId: string): Promise<Settings> {
+    return (
+      (await this.repository.get<Settings>(tenantId, "settings", "business"))?.value ?? {
+        killSwitch: true,
+        defaultLanguage: "it",
+        tone: "professionale, umano e conciso",
+      }
+    );
+  }
+  async saveSettings(tenantId: string, settings: Settings) {
+    const record = await this.repository.get(tenantId, "settings", "business");
+    if (
+      !(await this.repository.put(
+        tenantId,
+        "settings",
+        "business",
+        settings,
+        record?.version ?? null,
+      ))
+    )
+      throw new VersionConflictError(record?.version ?? 0, (record?.version ?? 0) + 1);
+    return settings;
+  }
+  async listLocations(tenantId: string) {
+    return this.values<Location>(tenantId, "location");
+  }
+  async upsertLocation(tenantId: string, location: Location) {
+    const record = await this.repository.get<Location>(tenantId, "location", location.id);
+    const value = { ...record?.value, ...location };
+    if (
+      !(await this.repository.put(
+        tenantId,
+        "location",
+        location.id,
+        value,
+        record?.version ?? null,
+      ))
+    )
+      throw new VersionConflictError(record?.version ?? 0, (record?.version ?? 0) + 1);
+    return value;
+  }
+}
+function expiry(days = 30) {
+  return new Date(Date.now() + days * 86_400_000).toISOString();
+}
+function deterministicUuid(value: string) {
+  const hash = createHash("sha256").update(value).digest("hex");
+  return `${hash.slice(0, 8)}-${hash.slice(8, 12)}-4${hash.slice(13, 16)}-8${hash.slice(17, 20)}-${hash.slice(20, 32)}`;
 }

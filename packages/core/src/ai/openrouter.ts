@@ -65,7 +65,7 @@ export class OpenRouterReplyProvider implements ReplyModelProvider {
       allow_fallbacks: true,
     };
     if (this.options.providerAllowlist?.length) {
-      provider.order = this.options.providerAllowlist;
+      provider.only = this.options.providerAllowlist;
     }
 
     const response = await this.request(`${this.baseUrl}/chat/completions`, {
@@ -99,9 +99,8 @@ export class OpenRouterReplyProvider implements ReplyModelProvider {
     });
 
     if (!response.ok) {
-      const body = await response.text();
       throw new DomainError(
-        `AI provider returned ${response.status}: ${body.slice(0, 300)}`,
+        `AI provider returned HTTP ${response.status}`,
         "ai_provider_error",
         502,
       );

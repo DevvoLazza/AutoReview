@@ -52,9 +52,12 @@ export class ReviewsController {
   constructor(private readonly reviews: ReviewService) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
+  async list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
     const parsed = reviewListQuerySchema.parse(query);
-    return { data: this.reviews.list(principal, parsed.status), meta: { limit: parsed.limit } };
+    const data = (await this.reviews.list(principal, parsed.status))
+      .filter((review) => !parsed.locationId || review.snapshot.locationId === parsed.locationId)
+      .slice(0, parsed.limit);
+    return { data, meta: { limit: parsed.limit } };
   }
 
   @Get(":id")
@@ -119,8 +122,8 @@ export class KnowledgeController {
   constructor(private readonly store: MemoryStore) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listKnowledge(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listKnowledge(principal.tenantId) };
   }
 
   @Post()
@@ -131,9 +134,9 @@ export class KnowledgeController {
 
   @Post(":id/approve")
   @Roles("owner", "admin")
-  approve(@Principal() principal: RequestPrincipal, @Param("id") id: string) {
-    const result = this.store.approveKnowledge(principal.tenantId, id);
-    this.store.appendAudit(principal, "knowledge.approved", "knowledge", id, {
+  async approve(@Principal() principal: RequestPrincipal, @Param("id") id: string) {
+    const result = await this.store.approveKnowledge(principal.tenantId, id);
+    await this.store.appendAudit(principal, "knowledge.approved", "knowledge", id, {
       version: result.version,
     });
     return result;
@@ -146,8 +149,8 @@ export class AutomationController {
   constructor(private readonly store: MemoryStore) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listRules(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listRules(principal.tenantId) };
   }
 
   @Post()
@@ -158,12 +161,18 @@ export class AutomationController {
 
   @Post(":id/enable")
   @Roles("owner")
-  enable(@Principal() principal: RequestPrincipal, @Param("id") id: string, @Body() body: unknown) {
+  async enable(
+    @Principal() principal: RequestPrincipal,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
     enableAutomationRuleSchema.parse(body);
     if (!principal.mfaVerified)
       throw new BadRequestException("MFA is required to enable automation");
-    const rule = this.store.enableRule(principal, id);
-    this.store.appendAudit(principal, "rule.enabled", "automation_rule", id, {
+    if (process.env.AUTOMATION_RELEASE_APPROVED !== "true")
+      throw new BadRequestException("Automatic publication is not released; use manual approval");
+    const rule = await this.store.enableRule(principal, id);
+    await this.store.appendAudit(principal, "rule.enabled", "automation_rule", id, {
       consentVersion: rule.consentVersion,
     });
     return rule;
@@ -177,8 +186,8 @@ export class AuditController {
 
   @Get()
   @Roles("owner", "admin")
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listAudit(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listAudit(principal.tenantId) };
   }
 }
 
@@ -219,8 +228,8 @@ export class IntegrationsController {
   async callback(@Query("code") code: string, @Query("state") state: string) {
     const payload = verifyState(state);
     const tokens = await this.google.exchangeCode(code);
-    this.store.setGoogleTokens(payload.tenantId, tokens);
-    this.store.appendAudit(
+    await this.store.setGoogleTokens(payload.tenantId, tokens);
+    await this.store.appendAudit(
       { tenantId: payload.tenantId, userId: payload.userId },
       "integration.connected",
       "google_connection",
@@ -255,14 +264,21 @@ export class GoogleWebhookController {
       mfaVerified: true,
     };
     const envelope = pubSubEnvelopeSchema.parse(body);
-    if (!this.store.claimEvent(envelope.message.messageId)) return { duplicate: true };
     const notification = googleReviewNotificationSchema.parse(
       JSON.parse(Buffer.from(envelope.message.data, "base64").toString("utf8")),
     );
-    const token = await currentAccessToken(this.store, this.google, principal.tenantId);
-    const snapshot = await this.google.getReview(token, notification.reviewName);
-    const review = await this.reviews.ingestAndGenerate(principal, snapshot);
-    return { accepted: true, reviewId: review.id };
+    if (!(await this.store.claimEvent(principal.tenantId, envelope.message.messageId)))
+      return { duplicate: true };
+    try {
+      const token = await currentAccessToken(this.store, this.google, principal.tenantId);
+      const snapshot = await this.google.getReview(token, notification.reviewName);
+      const review = await this.reviews.ingestAndGenerate(principal, snapshot);
+      await this.store.completeEvent(principal.tenantId, envelope.message.messageId);
+      return { accepted: true, reviewId: review.id };
+    } catch (error) {
+      await this.store.releaseEvent(principal.tenantId, envelope.message.messageId);
+      throw error;
+    }
   }
 
   @Post("demo")
@@ -276,12 +292,16 @@ async function currentAccessToken(
   google: GoogleBusinessGateway,
   tenantId: string,
 ): Promise<string> {
-  const current = store.getGoogleTokens(tenantId);
-  if (!current) return "demo-access-token";
+  const current = await store.getGoogleTokens(tenantId);
+  if (!current) {
+    if (process.env.GOOGLE_MODE !== "live" && process.env.NODE_ENV !== "production")
+      return "demo-access-token";
+    throw new UnauthorizedException("Connect Google before continuing");
+  }
   if (current.expiresAt > Date.now()) return current.accessToken;
   if (!current.refreshToken) throw new UnauthorizedException("Google connection must be renewed");
   const refreshed = await google.refreshAccessToken(current.refreshToken);
-  store.setGoogleTokens(tenantId, refreshed);
+  await store.setGoogleTokens(tenantId, refreshed);
   return refreshed.accessToken;
 }
 

@@ -8,7 +8,7 @@ export class ReviewNotificationService {
   constructor(private readonly store: MemoryStore) {}
 
   async reviewReady(principal: RequestPrincipal, review: ReviewCase): Promise<boolean> {
-    const registrations = this.store.listDeviceRegistrations(principal.tenantId);
+    const registrations = await this.store.listDeviceRegistrations(principal.tenantId);
     const userIds = [...new Set(registrations.map((registration) => registration.userId))];
     if (userIds.length === 0) return false;
     const gateway = new ExpoNotificationGateway(async (recipients) =>

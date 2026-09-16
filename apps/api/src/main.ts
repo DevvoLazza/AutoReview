@@ -3,12 +3,26 @@ import { NestFactory } from "@nestjs/core";
 import { FastifyAdapter, type NestFastifyApplication } from "@nestjs/platform-fastify";
 import { DocumentBuilder, SwaggerModule } from "@nestjs/swagger";
 import { AppModule } from "./app.module.js";
+import { assertStartupConfiguration } from "./config.js";
 import { HttpErrorFilter } from "./http-exception.filter.js";
 
 export async function createApp() {
+  assertStartupConfiguration();
   const app = await NestFactory.create<NestFastifyApplication>(
     AppModule,
-    new FastifyAdapter({ logger: process.env.NODE_ENV !== "test" }),
+    new FastifyAdapter({
+      logger:
+        process.env.NODE_ENV !== "test"
+          ? {
+              redact: [
+                "req.headers.authorization",
+                "req.headers.cookie",
+                "req.headers.x-reviewguard-worker-secret",
+              ],
+            }
+          : false,
+      bodyLimit: 8_000_000,
+    }),
   );
   app.setGlobalPrefix("v1");
   app.enableCors({
@@ -16,6 +30,7 @@ export async function createApp() {
     credentials: true,
   });
   app.useGlobalFilters(new HttpErrorFilter());
+  app.enableShutdownHooks();
   const document = SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
