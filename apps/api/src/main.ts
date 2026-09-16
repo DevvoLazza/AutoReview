@@ -41,7 +41,7 @@ export async function createApp() {
   const document = SwaggerModule.createDocument(
     app,
     new DocumentBuilder()
-      .setTitle("ReviewGuard API")
+      .setTitle("AutoReview API")
       .setDescription("Human-controlled Google Business review reply workflow")
       .setVersion("1.0")
       .addBearerAuth()
@@ -55,6 +55,9 @@ export async function createApp() {
 if (process.env.NODE_ENV !== "test") {
   const app = await createApp();
   const port = Number(process.env.PORT ?? 4100);
-  await app.listen(port, "0.0.0.0");
-  console.info(`ReviewGuard API listening on http://localhost:${port}/v1`);
+  await app.listen(
+    port,
+    process.env.HOST ?? (process.env.NODE_ENV === "production" ? "0.0.0.0" : "127.0.0.1"),
+  );
+  console.info(`AutoReview API listening on port ${port}`);
 }

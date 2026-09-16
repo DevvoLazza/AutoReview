@@ -21,6 +21,8 @@ const env = {
   TOKEN_ENCRYPTION_KEY: "",
   AUTOMATION_RELEASE_APPROVED: "false",
   PORT: "4100",
+  HOST: "127.0.0.1",
+  GOOGLE_REDIRECT_URI: "http://localhost:4100/v1/integrations/google/callback",
   API_INTERNAL_URL: "http://localhost:4100/v1",
   WEB_ORIGIN: "http://localhost:3000",
 };
@@ -38,6 +40,8 @@ const children = [
       "dev",
       "--port",
       "3000",
+      "--hostname",
+      "127.0.0.1",
     ],
     { cwd: `${root}apps/web`, env, stdio: "inherit", windowsHide: true },
   ),
