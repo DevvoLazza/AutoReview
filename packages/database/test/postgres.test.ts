@@ -59,6 +59,15 @@ describe("Embedded PostgreSQL runtime migration and repository", () => {
     expect(results.filter(Boolean)).toHaveLength(1);
     expect((await repository.get(tenant, "settings", "one"))?.version).toBe(2);
   });
+  it("accepts only the restricted runtime role at startup", async () => {
+    await expect(repository.assertSafeRuntimeRole(tenant)).resolves.toBeUndefined();
+    await database.exec("RESET ROLE");
+    try {
+      await expect(repository.assertSafeRuntimeRole(tenant)).rejects.toThrow("restricted");
+    } finally {
+      await database.exec("SET ROLE runtime_user");
+    }
+  });
   it("resets tenant scope between pooled requests", async () => {
     const other = "99999999-9999-4999-8999-999999999999";
     expect(await repository.get(other, "settings", "one")).toBeNull();

@@ -107,4 +107,16 @@ describe("automation decision engine", () => {
     });
     expect(result.hardStops).toContain("prompt_injection");
   });
+  it("hard-stops edited reviews even when both model passes report no risks", () => {
+    const result = decideAutomation({
+      review: { ...caseWith("Esperienza perfetta"), wasUpdated: true },
+      draft,
+      validation,
+      rules: [rule],
+      approvedManualCount: 40,
+      sentTodayByRule: {},
+    });
+    expect(result.action).toBe("require_approval");
+    expect(result.hardStops).toContain("review_updated");
+  });
 });

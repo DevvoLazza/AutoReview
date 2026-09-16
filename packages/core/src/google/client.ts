@@ -43,7 +43,7 @@ export interface GoogleBusinessClientOptions {
   fetchImpl?: typeof fetch;
 }
 
-const reviewNamePattern = /^accounts\/[^/]+\/locations\/[^/]+\/reviews\/[^/]+$/;
+const reviewNamePattern = /^accounts\/[^/?#]+\/locations\/[^/?#]+\/reviews\/[^/?#]+$/;
 
 export class GoogleBusinessClient implements GoogleBusinessGateway {
   private readonly request: typeof fetch;
@@ -163,7 +163,7 @@ export class GoogleBusinessClient implements GoogleBusinessGateway {
     return result;
   }
   async listReviews(accessToken: string, parent: string, pageToken?: string) {
-    if (!/^accounts\/[^/]+\/locations\/[^/]+$/.test(parent))
+    if (!/^accounts\/[^/?#]+\/locations\/[^/?#]+$/.test(parent))
       throw new DomainError("Invalid Google location", "invalid_google_resource", 400);
     const url = new URL(`https://mybusiness.googleapis.com/v4/${parent}/reviews`);
     url.searchParams.set("pageSize", "50");
