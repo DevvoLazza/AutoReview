@@ -212,6 +212,9 @@ export class ReviewService {
       const latest = await this.store.getReview(principal.tenantId, id);
       if (latest.status === "generating" && latest.version === generating.version)
         await this.store.transition(principal.tenantId, id, "needs_attention", latest.version);
+      await this.store.appendAudit(principal, "draft.generation_failed", "review", id, {
+        errorCode: error instanceof DomainError ? error.code : "provider_error",
+      });
       throw error;
     }
   }
@@ -348,6 +351,7 @@ export class ReviewService {
       startedAt: Date.now(),
     };
     review = await this.store.beginPublication(review, value, intent?.version ?? null);
+    let writeAttempted = false;
     try {
       await this.store.appendAudit(principal, "review.approved", "review", id, { manual });
       await this.store.appendAudit(principal, "reply.publish_started", "review", id);
@@ -355,6 +359,7 @@ export class ReviewService {
       const canonical = await this.google.getReview(token, review.snapshot.googleReviewName);
       if (canonical.updateTime !== review.snapshot.updateTime || canonical.existingReply)
         return this.invalidate(principal, review, canonical);
+      writeAttempted = true;
       await this.google.updateReply(token, review.snapshot.googleReviewName, value.text);
       const confirmed = await this.google.getReview(token, review.snapshot.googleReviewName);
       if (confirmed.existingReply !== value.text)
@@ -365,6 +370,14 @@ export class ReviewService {
         );
       return this.confirmPublished(principal, review, value, confirmed.updateTime);
     } catch (error) {
+      if (!writeAttempted) {
+        const latest = await this.store.getReview(principal.tenantId, id);
+        if (latest.status === "publishing" && latest.version === review.version)
+          await this.store.transition(principal.tenantId, id, "needs_attention", latest.version, {
+            scheduledAt: null,
+            matchedRuleId: null,
+          });
+      }
       // Do not retry PUT after an uncertain response. Re-read Google before any subsequent action.
       await this.store.appendAudit(principal, "reply.publish_failed", "review", id, {
         errorCode: error instanceof DomainError ? error.code : "transport_error",

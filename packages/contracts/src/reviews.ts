@@ -60,6 +60,7 @@ export const reviewListQuerySchema = z.object({
   cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
+export type ReviewListQuery = z.infer<typeof reviewListQuerySchema>;
 
 export const revisionRequestSchema = z.object({
   instruction: z.string().min(2).max(2_000),

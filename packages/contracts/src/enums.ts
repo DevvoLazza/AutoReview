@@ -54,6 +54,7 @@ export type RiskFlag = z.infer<typeof riskFlagSchema>;
 export const auditActionSchema = z.enum([
   "review.received",
   "draft.generated",
+  "draft.generation_failed",
   "draft.revised",
   "review.approved",
   "review.rejected",
