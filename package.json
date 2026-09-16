@@ -11,6 +11,8 @@
   },
   "scripts": {
     "dev": "turbo dev",
+    "dev:demo": "node scripts/dev-demo.mjs",
+    "test:e2e": "pnpm --filter @reviewguard/web test:e2e",
     "build": "turbo build",
     "test": "turbo test",
     "test:coverage": "turbo test:coverage",

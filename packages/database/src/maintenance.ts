@@ -7,13 +7,7 @@ export async function purgeExpiredGoogleContent(
   now = new Date(),
 ): Promise<number> {
   const expired = await db
-    .update(reviewCases)
-    .set({
-      reviewerDisplayName: "Expired Google user",
-      comment: "",
-      existingReply: null,
-      updatedAt: now,
-    })
+    .delete(reviewCases)
     .where(lt(reviewCases.contentExpiresAt, now))
     .returning({ id: reviewCases.id });
   return expired.length;

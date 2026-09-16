@@ -1,11 +1,14 @@
 node_modules/
 .pnpm-store/
 .turbo/
+.agent/tools/
 .next/
 dist/
 dist-android/
 dist-ios/
 coverage/
+test-results/
+playwright-report/
 .expo/
 .env
 .env.local

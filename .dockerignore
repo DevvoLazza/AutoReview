@@ -5,6 +5,9 @@ node_modules
 **/dist-ios
 **/.next
 .git
+.agent/tools
+**/test-results
+**/playwright-report
 .env
 .env.*
 !.env.example

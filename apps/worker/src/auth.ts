@@ -21,6 +21,8 @@ export async function verifyGoogleOidc(request: FastifyRequest): Promise<void> {
   const result = await jwtVerify(authorization.slice("Bearer ".length), googleJwks, {
     audience,
     issuer: ["https://accounts.google.com", "accounts.google.com"],
+  }).catch(() => {
+    throw Object.assign(new Error("Invalid Google service identity"), { statusCode: 401 });
   });
   if (result.payload.email !== expectedEmail || result.payload.email_verified !== true) {
     throw Object.assign(new Error("Unexpected Google service identity"), { statusCode: 403 });

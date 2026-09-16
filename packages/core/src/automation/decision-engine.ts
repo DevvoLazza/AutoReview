@@ -71,6 +71,7 @@ export function decideAutomation(context: AutomationContext): AutomationDecision
     detectHardStops(context.review.snapshot),
     context.validation,
   ).filter((flag) => nonOverridableFlags.has(flag));
+  if (context.review.wasUpdated) hardStops.push("review_updated");
   if (
     context.draft.unsupportedClaims.length > 0 ||
     context.validation.unsupportedClaims.length > 0

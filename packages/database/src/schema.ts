@@ -1,6 +1,7 @@
 import { sql } from "drizzle-orm";
 import {
   boolean,
+  check,
   index,
   integer,
   jsonb,
@@ -15,6 +16,63 @@ import {
 } from "drizzle-orm/pg-core";
 
 export const roleEnum = pgEnum("member_role", ["owner", "admin", "editor", "approver"]);
+export const runtimeRecords = pgTable(
+  "runtime_records",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    kind: text("kind").notNull(),
+    id: text("id").notNull(),
+    version: integer("version").notNull().default(1),
+    payload: jsonb("payload").notNull(),
+    expiresAt: timestamp("expires_at", { withTimezone: true }),
+    updatedAt: timestamp("updated_at", { withTimezone: true }).notNull().defaultNow(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tenantId, table.kind, table.id] }),
+    check("runtime_records_version_check", sql`${table.version}>0`),
+    check(
+      "runtime_records_kind_check",
+      sql`${table.kind} IN ('review','knowledge','rule','audit','google_tokens','device','event','settings','location','counter','oauth','publish')`,
+    ),
+    index("runtime_records_expiry_idx")
+      .on(table.expiresAt)
+      .where(sql`${table.expiresAt} IS NOT NULL`),
+    uniqueIndex("runtime_review_google_idx")
+      .on(table.tenantId, sql`(${table.payload}->'snapshot'->>'googleReviewName')`)
+      .where(sql`${table.kind}='review'`),
+    index("runtime_knowledge_search_idx")
+      .using("gin", sql`to_tsvector('simple',${table.payload}->>'content')`)
+      .where(sql`${table.kind}='knowledge'`),
+  ],
+);
+export const runtimeKnowledgeChunks = pgTable(
+  "runtime_knowledge_chunks",
+  {
+    tenantId: uuid("tenant_id").notNull(),
+    sourceId: uuid("source_id").notNull(),
+    sourceVersion: integer("source_version").notNull(),
+    ordinal: integer("ordinal").notNull(),
+    content: text("content").notNull(),
+    embedding: vector("embedding", { dimensions: 768 }).notNull(),
+    embeddingModel: text("embedding_model").notNull(),
+  },
+  (table) => [
+    primaryKey({ columns: [table.tenantId, table.sourceId, table.sourceVersion, table.ordinal] }),
+    index("runtime_knowledge_chunks_lookup_idx").on(
+      table.tenantId,
+      table.sourceId,
+      table.sourceVersion,
+    ),
+    index("runtime_knowledge_chunks_search_idx").using(
+      "gin",
+      sql`to_tsvector('simple',${table.content})`,
+    ),
+    index("runtime_knowledge_chunks_vector_idx").using(
+      "hnsw",
+      table.embedding.op("vector_cosine_ops"),
+    ),
+  ],
+);
 export const reviewStatusEnum = pgEnum("review_workflow_status", [
   "received",
   "generating",

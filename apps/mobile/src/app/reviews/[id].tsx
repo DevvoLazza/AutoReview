@@ -1,6 +1,6 @@
-import type { ReviewCase } from "@reviewguard/contracts";
+import type { KnowledgeSource, RequestPrincipal, ReviewCase } from "@reviewguard/contracts";
 import { useLocalSearchParams, useRouter } from "expo-router";
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -13,7 +13,7 @@ import {
   TextInput,
   View,
 } from "react-native";
-import { decide, getReview, revise } from "@/lib/api";
+import { decide, edit, getReview, request, revise } from "@/lib/api";
 import { colors } from "@/lib/theme";
 
 export default function ReviewDetailScreen() {
@@ -22,16 +22,41 @@ export default function ReviewDetailScreen() {
   const [review, setReview] = useState<ReviewCase | null>(null);
   const [instruction, setInstruction] = useState("");
   const [busy, setBusy] = useState(false);
-  useEffect(() => {
-    if (id)
-      getReview(id)
-        .then(setReview)
-        .catch((e) => Alert.alert("Errore", e.message));
+  const [draft, setDraft] = useState("");
+  const [error, setError] = useState<string | null>(null);
+  const [principal, setPrincipal] = useState<RequestPrincipal | null>(null);
+  const [source, setSource] = useState<KnowledgeSource | null>(null);
+  const load = useCallback(async () => {
+    setError(null);
+    try {
+      const [value, session] = await Promise.all([
+        getReview(id),
+        request<{ principal: RequestPrincipal }>("/session"),
+      ]);
+      setReview(value);
+      setDraft(value.activeDraft?.text ?? "");
+      setPrincipal(session.principal);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Caricamento non riuscito");
+    }
   }, [id]);
+  useEffect(() => {
+    if (id) void load();
+  }, [id, load]);
   if (!review)
     return (
       <View style={styles.loading}>
-        <ActivityIndicator color={colors.green} />
+        {!error && <ActivityIndicator color={colors.green} />}
+        {error && (
+          <>
+            <Text accessibilityRole="alert" style={styles.emptyText}>
+              {error}
+            </Text>
+            <Pressable accessibilityRole="button" onPress={load}>
+              <Text style={styles.label}>Riprova</Text>
+            </Pressable>
+          </>
+        )}
       </View>
     );
   const run = async (operation: () => Promise<ReviewCase>, success: string) => {
@@ -39,8 +64,9 @@ export default function ReviewDetailScreen() {
     try {
       const next = await operation();
       setReview(next);
+      setDraft(next.activeDraft?.text ?? "");
       Alert.alert(
-        success,
+        next.status === "needs_attention" ? "Nuova verifica necessaria" : success,
         next.status === "published" ? "La risposta è stata confermata da Google." : undefined,
       );
       if (next.status === "published" || next.status === "rejected") router.back();
@@ -51,6 +77,9 @@ export default function ReviewDetailScreen() {
     }
   };
   const risk = Boolean(review.activeDraft?.riskFlags.length) || review.status === "needs_attention";
+  const canApprove = Boolean(
+    principal?.mfaVerified && ["owner", "approver"].includes(principal.role),
+  );
   return (
     <KeyboardAvoidingView
       style={styles.flex}
@@ -67,7 +96,7 @@ export default function ReviewDetailScreen() {
             <View>
               <Text style={styles.name}>{review.snapshot.reviewerDisplayName}</Text>
               <Text style={styles.meta}>
-                {review.snapshot.languageHint?.toUpperCase()} · Demo Location
+                {review.snapshot.languageHint?.toUpperCase() ?? "AUTO"} · {review.status}
               </Text>
             </View>
           </View>
@@ -90,22 +119,91 @@ export default function ReviewDetailScreen() {
               <Text style={styles.kicker}>PROPOSTA AI</Text>
               <Text style={styles.heading}>Risposta pubblica</Text>
             </View>
-            <Text style={styles.model}>V4 PRO</Text>
+            <Text style={styles.model}>DA VERIFICARE</Text>
           </View>
           {review.activeDraft ? (
             <TextInput
               style={styles.draft}
-              value={review.activeDraft.text}
+              value={draft}
               multiline
-              editable={false}
+              accessibilityLabel="Testo risposta"
+              maxLength={4000}
+              onChangeText={setDraft}
+              editable={!busy && !["published", "publishing"].includes(review.status)}
             />
           ) : (
             <View style={styles.empty}>
               <Text style={styles.emptyIcon}>AI</Text>
               <Text style={styles.emptyText}>
-                Genera una proposta dal pannello web oppure chiedi una nuova versione.
+                Genera una proposta, controlla le fonti e approva soltanto quando è corretta.
               </Text>
             </View>
+          )}
+          {!review.activeDraft &&
+            !review.snapshot.existingReply &&
+            ["received", "rejected", "needs_attention"].includes(review.status) && (
+              <Pressable
+                accessibilityRole="button"
+                style={styles.reviseButton}
+                disabled={busy}
+                onPress={() => run(() => decide(review, "generate"), "Bozza generata")}
+              >
+                <Text style={styles.reviseText}>Genera risposta</Text>
+              </Pressable>
+            )}
+          {review.activeDraft && draft !== review.activeDraft.text && (
+            <Pressable
+              accessibilityRole="button"
+              style={styles.reviseButton}
+              disabled={busy || !draft.trim()}
+              onPress={() => run(() => edit(review, draft), "Modifica salvata")}
+            >
+              <Text style={styles.reviseText}>Salva modifica prima di approvare</Text>
+            </Pressable>
+          )}
+          {review.activeDraft?.knowledgeSourceIds.map((sourceId, index) => (
+            <Pressable
+              key={sourceId}
+              accessibilityRole="button"
+              onPress={async () => {
+                try {
+                  setSource(await request<KnowledgeSource>(`/knowledge/${sourceId}`));
+                } catch {
+                  Alert.alert("Fonte non disponibile", "Riprova o consulta la dashboard web.");
+                }
+              }}
+            >
+              <Text style={styles.label}>Leggi fonte {index + 1}</Text>
+            </Pressable>
+          ))}
+          {source && (
+            <View>
+              <Text style={styles.heading}>
+                {source.title} · v{source.version} · {source.status}
+              </Text>
+              <Text style={styles.comment}>{source.content}</Text>
+              <Pressable accessibilityRole="button" onPress={() => setSource(null)}>
+                <Text style={styles.label}>Chiudi fonte</Text>
+              </Pressable>
+            </View>
+          )}
+          {review.status === "scheduled_auto" && (
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy || !canApprove}
+              onPress={() => run(() => decide(review, "cancel-schedule"), "Invio annullato")}
+            >
+              <Text style={styles.rejectText}>Annulla invio programmato</Text>
+            </Pressable>
+          )}
+          {review.status === "publishing" && (
+            <Pressable
+              accessibilityRole="button"
+              disabled={busy || !canApprove}
+              onPress={() => run(() => decide(review, "approve"), "Esito verificato")}
+            >
+              <Text style={styles.label}>Attendi due minuti, poi verifica esito Google</Text>
+            </Pressable>
           )}
           <Text style={styles.label}>COME DEVE ESSERE MODIFICATA?</Text>
           <View style={styles.reviseRow}>
@@ -117,7 +215,12 @@ export default function ReviewDetailScreen() {
               onChangeText={setInstruction}
             />
             <Pressable
-              disabled={busy || instruction.length < 2}
+              disabled={
+                busy ||
+                instruction.length < 2 ||
+                ["published", "publishing", "generating"].includes(review.status) ||
+                Boolean(review.snapshot.existingReply)
+              }
               style={({ pressed }) => [
                 styles.reviseButton,
                 (busy || instruction.length < 2) && styles.disabled,
@@ -130,17 +233,34 @@ export default function ReviewDetailScreen() {
           </View>
         </View>
         <Text style={styles.safety}>✓ Il modello non possiede credenziali di pubblicazione</Text>
+        {!canApprove && (
+          <Text style={styles.emptyText}>
+            Per pubblicare servono ruolo Owner/Approver e accesso con MFA.
+          </Text>
+        )}
       </ScrollView>
       <View style={styles.actions}>
         <Pressable
-          disabled={busy}
+          accessibilityRole="button"
+          disabled={
+            busy ||
+            !canApprove ||
+            !["pending_approval", "scheduled_auto", "needs_attention"].includes(review.status)
+          }
           style={({ pressed }) => [styles.reject, pressed && styles.pressed]}
           onPress={() => run(() => decide(review, "reject"), "Risposta rifiutata")}
         >
           <Text style={styles.rejectText}>Rifiuta</Text>
         </Pressable>
         <Pressable
-          disabled={busy || !review.activeDraft || review.status !== "pending_approval"}
+          accessibilityRole="button"
+          disabled={
+            busy ||
+            !canApprove ||
+            !review.activeDraft ||
+            review.status !== "pending_approval" ||
+            draft !== review.activeDraft?.text
+          }
           style={({ pressed }) => [
             styles.approve,
             (busy || !review.activeDraft || review.status !== "pending_approval") &&

@@ -2,24 +2,21 @@
 
 import type { ReviewCase } from "@reviewguard/contracts";
 import Link from "next/link";
-import { useEffect, useState } from "react";
-import { apiRequest } from "@/lib/api";
-import { demoReviews } from "@/lib/demo-data";
+import { useState } from "react";
+import { useResource } from "@/lib/use-resource";
 import { Icon } from "./icons";
+import { ResourceState } from "./resource-state";
 import { StatusBadge } from "./status-badge";
 
 export function Inbox() {
-  const [reviews, setReviews] = useState<ReviewCase[]>(demoReviews);
-  const [live, setLive] = useState(false);
-
-  useEffect(() => {
-    apiRequest<{ data: ReviewCase[] }>("/reviews")
-      .then((result) => {
-        setReviews(result.data);
-        setLive(true);
-      })
-      .catch(() => setLive(false));
-  }, []);
+  const [status, setStatus] = useState("");
+  const [cursors, setCursors] = useState<string[]>([]);
+  const cursor = cursors.at(-1);
+  const { data, error, loading, refresh } = useResource<{
+    data: ReviewCase[];
+    meta: { total: number; nextCursor: string | null };
+  }>(`/reviews?limit=50${status ? `&status=${status}` : ""}${cursor ? `&cursor=${cursor}` : ""}`);
+  const reviews = data?.data ?? [];
 
   return (
     <section className="panel inbox-panel" id="inbox">
@@ -29,46 +26,92 @@ export function Inbox() {
           <h2>Recensioni da gestire</h2>
         </div>
         <div className="panel-actions">
-          <span className={live ? "live-dot" : "demo-dot"} />
-          <small>{live ? "API connessa" : "Dati dimostrativi"}</small>
-          <button type="button" className="ghost-button">
-            Filtra
+          <select
+            aria-label="Filtra recensioni per stato"
+            value={status}
+            onChange={(event) => {
+              setStatus(event.target.value);
+              setCursors([]);
+            }}
+          >
+            <option value="">Tutti gli stati</option>
+            <option value="received">Da generare</option>
+            <option value="pending_approval">Da approvare</option>
+            <option value="needs_attention">Da verificare</option>
+            <option value="scheduled_auto">Programmate</option>
+            <option value="publishing">Invio in corso</option>
+            <option value="published">Pubblicate</option>
+            <option value="rejected">Rifiutate</option>
+          </select>
+          <button type="button" className="ghost-button" disabled={loading} onClick={refresh}>
+            Aggiorna
           </button>
         </div>
       </div>
       <div className="review-list">
-        {reviews.map((review) => (
-          <Link href={`/inbox/${review.id}`} className="review-row" key={review.id}>
-            <div className={`rating-orb rating-${review.snapshot.starRating}`}>
-              {review.snapshot.starRating}
-              <span>★</span>
-            </div>
-            <div className="review-main">
-              <div className="review-meta">
-                <strong>{review.snapshot.reviewerDisplayName}</strong>
-                <span>·</span>
-                <span>{relativeTime(review.snapshot.createTime)}</span>
+        <ResourceState loading={loading} error={error} retry={refresh} />
+        {!loading && !error && reviews.length === 0 && (
+          <p className="operational-panel">
+            Nessuna recensione. Collega Google dalle impostazioni e importa una sede, oppure cambia
+            filtro.
+          </p>
+        )}
+        {!loading &&
+          !error &&
+          reviews.map((review) => (
+            <Link href={`/inbox/${review.id}`} className="review-row" key={review.id}>
+              <div className={`rating-orb rating-${review.snapshot.starRating}`}>
+                {review.snapshot.starRating}
+                <span>★</span>
               </div>
-              <p>{review.snapshot.comment || "Recensione senza testo"}</p>
-              {review.activeDraft ? (
-                <small className="draft-preview">
-                  <span>AI</span>
-                  {review.activeDraft.text}
-                </small>
-              ) : null}
-            </div>
-            <div className="review-tail">
-              <StatusBadge status={review.status} />
-              <Icon name="arrow" />
-            </div>
-          </Link>
-        ))}
+              <div className="review-main">
+                <div className="review-meta">
+                  <strong>{review.snapshot.reviewerDisplayName}</strong>
+                  <span>·</span>
+                  <span>{relativeTime(review.snapshot.createTime)}</span>
+                </div>
+                <p>{review.snapshot.comment || "Recensione senza testo"}</p>
+                {review.activeDraft ? (
+                  <small className="draft-preview">
+                    <span>AI</span>
+                    {review.activeDraft.text}
+                  </small>
+                ) : null}
+              </div>
+              <div className="review-tail">
+                <StatusBadge status={review.status} />
+                <Icon name="arrow" />
+              </div>
+            </Link>
+          ))}
       </div>
       <div className="panel-footer">
-        <span>Mostrate {reviews.length} recensioni operative</span>
-        <button type="button" className="text-button">
-          Vedi tutto <Icon name="arrow" />
-        </button>
+        <span>
+          Mostrate {reviews.length} di {data?.meta.total ?? 0} recensioni · pagina{" "}
+          {cursors.length + 1}
+        </span>
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={loading || !cursors.length}
+            onClick={() => setCursors((previous) => previous.slice(0, -1))}
+          >
+            Precedenti
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={loading || !data?.meta.nextCursor}
+            onClick={() => {
+              if (data?.meta.nextCursor)
+                setCursors((previous) => [...previous, data.meta.nextCursor as string]);
+            }}
+          >
+            Successive
+          </button>
+        </div>
+        <small>Le nuove recensioni restano nell’inbox anche senza notifica push.</small>
       </div>
     </section>
   );

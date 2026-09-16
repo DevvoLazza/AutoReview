@@ -32,10 +32,7 @@ export class HttpErrorFilter implements ExceptionFilter {
       response.status(exception.getStatus()).send(exception.getResponse());
       return;
     }
-    console.error(
-      "unhandled_api_error",
-      exception instanceof Error ? exception.message : "unknown",
-    );
+    console.error("unhandled_api_error", exception instanceof Error ? exception.name : "unknown");
     response
       .status(HttpStatus.INTERNAL_SERVER_ERROR)
       .send({ error: "internal_error", message: "Unexpected server error" });

@@ -12,7 +12,8 @@ export const GOOGLE_GATEWAY = Symbol("GOOGLE_GATEWAY");
 export const aiProvider = {
   provide: AI_PROVIDER,
   useFactory: () => {
-    if ((process.env.AI_MODE ?? "mock") !== "live") return new MockReplyProvider();
+    if (!["live", "openrouter"].includes(process.env.AI_MODE ?? "mock"))
+      return new MockReplyProvider();
     return new OpenRouterReplyProvider({
       apiKey: process.env.OPENROUTER_API_KEY ?? "",
       baseUrl: process.env.OPENROUTER_BASE_URL,

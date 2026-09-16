@@ -1,13 +1,9 @@
 import Link from "next/link";
-import { notFound } from "next/navigation";
 import { Icon } from "@/components/icons";
-import { ReviewWorkbench } from "@/components/review-workbench";
-import { demoReviews } from "@/lib/demo-data";
+import { ReviewDetail } from "@/components/review-detail";
 
 export default async function ReviewPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const review = demoReviews.find((item) => item.id === id);
-  if (!review) notFound();
   return (
     <div className="page-wrap">
       <header className="detail-header">
@@ -25,7 +21,7 @@ export default async function ReviewPage({ params }: { params: Promise<{ id: str
           </div>
         </div>
       </header>
-      <ReviewWorkbench initial={review} />
+      <ReviewDetail id={id} />
     </div>
   );
 }

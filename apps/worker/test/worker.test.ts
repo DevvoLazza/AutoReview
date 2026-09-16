@@ -10,7 +10,7 @@ const notification = {
 describe("Google event worker", () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it("validates and deduplicates Pub/Sub delivery", async () => {
+  it("delegates every valid redelivery to the durable API lease", async () => {
     const fetchImpl = vi.fn(
       async () => new Response(JSON.stringify({ accepted: true }), { status: 200 }),
     );
@@ -28,8 +28,8 @@ describe("Google event worker", () => {
       payload,
     });
     expect(first.statusCode).toBe(204);
-    expect(duplicate.json()).toEqual({ duplicate: true });
-    expect(fetchImpl).toHaveBeenCalledTimes(1);
+    expect(duplicate.statusCode).toBe(204);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
     await worker.close();
   });
 

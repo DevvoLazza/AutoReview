@@ -3,7 +3,6 @@ import {
   googleReviewNotificationSchema,
   pubSubEnvelopeSchema,
 } from "@reviewguard/contracts";
-import { createDatabase, purgeExpiredGoogleContent } from "@reviewguard/database";
 import Fastify, { type FastifyInstance } from "fastify";
 import { z } from "zod";
 import { verifyGoogleOidc } from "./auth.js";
@@ -23,8 +22,6 @@ export type WorkerOptions = {
 export function createWorker(options: WorkerOptions = {}): FastifyInstance {
   const worker = Fastify({ logger: process.env.NODE_ENV !== "test" });
   const fetchImpl = options.fetchImpl ?? fetch;
-  const now = options.now ?? Date.now;
-  const claimed = new Map<string, number>();
 
   worker.get("/health", async () => ({
     status: "ok",
@@ -35,17 +32,10 @@ export function createWorker(options: WorkerOptions = {}): FastifyInstance {
   worker.post("/events/google-business", async (request, reply) => {
     await verifyGoogleOidc(request);
     const envelope = pubSubEnvelopeSchema.parse(request.body);
-    pruneClaims(claimed, now());
-    if (claimed.has(envelope.message.messageId)) return { duplicate: true };
     const _notification = parseNotification(envelope.message.data);
-    claimed.set(envelope.message.messageId, now());
-    try {
-      await callApi(fetchImpl, "/webhooks/google-business", envelope);
-      return reply.code(204).send();
-    } catch (error) {
-      claimed.delete(envelope.message.messageId);
-      throw error;
-    }
+    // Only the durable API lease may deduplicate. In-flight redelivery must not be acknowledged early.
+    await callApi(fetchImpl, "/webhooks/google-business", envelope);
+    return reply.code(204).send();
   });
 
   worker.post("/tasks/publish", async (request) => {
@@ -60,15 +50,11 @@ export function createWorker(options: WorkerOptions = {}): FastifyInstance {
 
   worker.post("/tasks/purge-expired-google-content", async (request) => {
     await verifyGoogleOidc(request);
-    const connectionString = process.env.DATABASE_URL;
-    if (!connectionString)
-      throw Object.assign(new Error("DATABASE_URL is required"), { statusCode: 503 });
-    const { db, pool } = createDatabase(connectionString);
-    try {
-      return { purged: await purgeExpiredGoogleContent(db) };
-    } finally {
-      await pool.end();
-    }
+    return callApi(fetchImpl, "/internal/reviews/purge-expired-google-content", {});
+  });
+  worker.post("/tasks/retry-notifications", async (request) => {
+    await verifyGoogleOidc(request);
+    return callApi(fetchImpl, "/internal/reviews/retry-notifications", {});
   });
 
   worker.setErrorHandler((error, _request, reply) => {
@@ -77,7 +63,10 @@ export function createWorker(options: WorkerOptions = {}): FastifyInstance {
     const status = typeof statusCode === "number" ? statusCode : 500;
     reply.code(status).send({
       error: status >= 500 ? "worker_error" : "invalid_request",
-      message: normalized.message,
+      message:
+        status >= 500
+          ? "Worker request failed; retry or inspect service metrics"
+          : normalized.message,
     });
   });
   return worker;
@@ -103,7 +92,7 @@ async function callApi(fetchImpl: typeof fetch, path: string, body: unknown): Pr
         process.env.INTERNAL_WORKER_SECRET ?? "reviewguard-local-worker-secret",
     },
     body: JSON.stringify(body),
-    signal: AbortSignal.timeout(20_000),
+    signal: AbortSignal.timeout(95_000),
   });
   if (!response.ok) {
     throw Object.assign(new Error(`API returned ${response.status}`), {
@@ -112,13 +101,6 @@ async function callApi(fetchImpl: typeof fetch, path: string, body: unknown): Pr
   }
   if (response.status === 204) return null;
   return response.json();
-}
-
-function pruneClaims(claimed: Map<string, number>, time: number): void {
-  const retentionMs = 24 * 60 * 60 * 1_000;
-  for (const [messageId, claimedAt] of claimed) {
-    if (time - claimedAt > retentionMs) claimed.delete(messageId);
-  }
 }
 
 if (process.env.NODE_ENV !== "test") {

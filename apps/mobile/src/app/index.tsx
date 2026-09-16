@@ -1,23 +1,55 @@
 import type { ReviewCase } from "@reviewguard/contracts";
-import { useCallback, useEffect, useState } from "react";
-import { RefreshControl, SafeAreaView, ScrollView, StyleSheet, Text, View } from "react-native";
+import { useFocusEffect } from "expo-router";
+import { useCallback, useState } from "react";
+import {
+  Alert,
+  Platform,
+  Pressable,
+  RefreshControl,
+  SafeAreaView,
+  ScrollView,
+  StyleSheet,
+  Text,
+  View,
+} from "react-native";
 import { ReviewCard } from "@/components/ReviewCard";
-import { listReviews } from "@/lib/api";
+import { listReviews, registerDeviceToken, request } from "@/lib/api";
+import { registerForPushNotifications } from "@/lib/notifications";
+import { signOut } from "@/lib/session";
 import { colors } from "@/lib/theme";
 
 export default function InboxScreen() {
   const [reviews, setReviews] = useState<ReviewCase[]>([]);
   const [refreshing, setRefreshing] = useState(false);
   const [live, setLive] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [count, setCount] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [moreLoading, setMoreLoading] = useState(false);
   const load = useCallback(async () => {
-    const result = await listReviews();
-    setReviews(result.data);
-    setLive(result.live);
-    setRefreshing(false);
+    setError(null);
+    try {
+      const [result, workspace] = await Promise.all([
+        listReviews(),
+        request<{ locations: Array<{ manualApprovalCount: number }> }>("/workspace"),
+      ]);
+      setReviews(result.data);
+      setNextCursor(result.nextCursor);
+      setLive(result.live);
+      setCount(workspace.locations[0]?.manualApprovalCount ?? 0);
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : "Caricamento non riuscito");
+    } finally {
+      setRefreshing(false);
+      setLoading(false);
+    }
   }, []);
-  useEffect(() => {
-    load();
-  }, [load]);
+  useFocusEffect(
+    useCallback(() => {
+      void load();
+    }, [load]),
+  );
   return (
     <SafeAreaView style={styles.safe}>
       <ScrollView
@@ -36,7 +68,7 @@ export default function InboxScreen() {
         <View style={styles.header}>
           <View>
             <Text style={styles.kicker}>CENTRO APPROVAZIONI</Text>
-            <Text style={styles.title}>Buongiorno, Demo</Text>
+            <Text style={styles.title}>Le tue recensioni</Text>
             <Text style={styles.subtitle}>Le risposte restano sotto il tuo controllo.</Text>
           </View>
           <View style={styles.avatar}>
@@ -69,7 +101,8 @@ export default function InboxScreen() {
           <View style={styles.divider} />
           <View style={styles.stat}>
             <Text style={styles.statNumber}>
-              14<Text style={styles.statSmall}>/20</Text>
+              {count}
+              <Text style={styles.statSmall}>/20</Text>
             </Text>
             <Text style={styles.statLabel}>CALIBRAZIONE</Text>
           </View>
@@ -85,9 +118,80 @@ export default function InboxScreen() {
             </Text>
           </View>
         </View>
-        {reviews.map((review) => (
-          <ReviewCard review={review} key={review.id} />
-        ))}
+        {loading && (
+          <Text accessibilityRole="text" style={styles.subtitle}>
+            Caricamento…
+          </Text>
+        )}
+        {error && (
+          <View>
+            <Text accessibilityRole="alert" style={styles.subtitle}>
+              {error}
+            </Text>
+            <Pressable accessibilityRole="button" onPress={load}>
+              <Text style={styles.securityCopy}>Riprova</Text>
+            </Pressable>
+          </View>
+        )}
+        {!loading && !error && !reviews.length && (
+          <Text style={styles.subtitle}>
+            Nessuna recensione. Collega Google e importa una sede dalla dashboard web.
+          </Text>
+        )}
+        {!error && reviews.map((review) => <ReviewCard review={review} key={review.id} />)}
+        {!error && nextCursor && (
+          <Pressable
+            accessibilityRole="button"
+            disabled={moreLoading}
+            onPress={async () => {
+              setMoreLoading(true);
+              try {
+                const result = await listReviews(nextCursor);
+                setReviews((previous) => [
+                  ...new Map(
+                    [...previous, ...result.data].map((entry) => [entry.id, entry]),
+                  ).values(),
+                ]);
+                setNextCursor(result.nextCursor);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : "Caricamento non riuscito");
+              } finally {
+                setMoreLoading(false);
+              }
+            }}
+          >
+            <Text style={styles.subtitle}>
+              {moreLoading ? "Caricamento…" : "Carica altre recensioni"}
+            </Text>
+          </Pressable>
+        )}
+        <Pressable
+          accessibilityRole="button"
+          onPress={async () => {
+            try {
+              const token = await registerForPushNotifications();
+              if (!token || (Platform.OS !== "ios" && Platform.OS !== "android")) {
+                Alert.alert(
+                  "Notifiche non disponibili",
+                  "Servono un dispositivo fisico, un progetto EAS configurato e il permesso alle notifiche. L’inbox resta utilizzabile.",
+                );
+                return;
+              }
+              await registerDeviceToken(token, Platform.OS);
+              Alert.alert("Notifiche abilitate", "Riceverai avvisi senza testo delle recensioni.");
+            } catch {
+              Alert.alert(
+                "Notifiche non abilitate",
+                "Verifica la connessione e la configurazione EAS. Puoi continuare a usare l’inbox.",
+              );
+            }
+          }}
+        >
+          <Text style={styles.subtitle}>Abilita notifiche di approvazione</Text>
+        </Pressable>
+        <Pressable accessibilityRole="button" onPress={signOut}>
+          <Text style={styles.subtitle}>Esci dall’account</Text>
+        </Pressable>
         <Text style={styles.privacy}>
           Le notifiche non contengono mai il testo della recensione.
         </Text>

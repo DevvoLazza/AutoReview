@@ -48,12 +48,16 @@ export const reviewCaseSchema = z.object({
   publishedReply: z.string().max(4_000).nullable(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
+  contentExpiresAt: z.iso.datetime().optional(),
+  wasUpdated: z.boolean().optional(),
+  knowledgeVersions: z.record(z.string(), z.number().int().positive()).optional(),
 });
 export type ReviewCase = z.infer<typeof reviewCaseSchema>;
 
 export const reviewListQuerySchema = z.object({
   status: reviewWorkflowStatusSchema.optional(),
   locationId: z.string().optional(),
+  cursor: z.string().uuid().optional(),
   limit: z.coerce.number().int().min(1).max(100).default(50),
 });
 export type ReviewListQuery = z.infer<typeof reviewListQuerySchema>;

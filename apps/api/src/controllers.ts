@@ -23,14 +23,21 @@ import {
   googleReviewNotificationSchema,
   pubSubEnvelopeSchema,
   type RequestPrincipal,
-  type ReviewSnapshot,
   reviewListQuerySchema,
+  reviewSnapshotSchema,
   revisionRequestSchema,
 } from "@reviewguard/contracts";
-import type { GoogleBusinessGateway } from "@reviewguard/core";
+import {
+  decideAutomation,
+  FakeGoogleBusinessClient,
+  type GoogleBusinessGateway,
+} from "@reviewguard/core";
 import { z } from "zod";
 import { Principal, Public, Roles } from "./auth.js";
 import { DEMO_SNAPSHOTS, DEMO_TENANT_ID, DEMO_USER_ID } from "./demo.js";
+import { IntegrationService } from "./integration.service.js";
+import { KnowledgeService } from "./knowledge.service.js";
+import { ReviewNotificationService } from "./notifications.js";
 import { GOOGLE_GATEWAY } from "./providers.js";
 import { ReviewService } from "./review.service.js";
 import { MemoryStore } from "./store.js";
@@ -52,9 +59,25 @@ export class ReviewsController {
   constructor(private readonly reviews: ReviewService) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
+  async list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
     const parsed = reviewListQuerySchema.parse(query);
-    return { data: this.reviews.list(principal, parsed), meta: { limit: parsed.limit } };
+    const matches = (await this.reviews.list(principal, parsed.status)).filter(
+      (review) => !parsed.locationId || review.snapshot.locationId === parsed.locationId,
+    );
+    const position = parsed.cursor
+      ? matches.findIndex((review) => review.id === parsed.cursor)
+      : -1;
+    if (parsed.cursor && position < 0)
+      throw new BadRequestException("Pagina scaduta: aggiorna l’inbox");
+    const data = matches.slice(position + 1, position + 1 + parsed.limit);
+    return {
+      data,
+      meta: {
+        limit: parsed.limit,
+        total: matches.length,
+        nextCursor: position + 1 + data.length < matches.length ? data.at(-1)?.id : null,
+      },
+    };
   }
 
   @Get(":id")
@@ -116,11 +139,14 @@ export class ReviewsController {
 @ApiTags("knowledge")
 @Controller("knowledge")
 export class KnowledgeController {
-  constructor(private readonly store: MemoryStore) {}
+  constructor(
+    private readonly store: MemoryStore,
+    private readonly knowledge: KnowledgeService,
+  ) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listKnowledge(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listKnowledge(principal.tenantId) };
   }
 
   @Post()
@@ -129,11 +155,64 @@ export class KnowledgeController {
     return this.store.createKnowledge(principal, createKnowledgeSourceSchema.parse(body));
   }
 
+  @Get(":id")
+  async getSource(@Principal() principal: RequestPrincipal, @Param("id") id: string) {
+    const entry = (await this.store.listKnowledge(principal.tenantId)).find(
+      (source) => source.id === id,
+    );
+    if (!entry) throw new BadRequestException("Fonte non disponibile");
+    return entry;
+  }
+
+  @Post(":id/edit")
+  @Roles("owner", "admin", "editor")
+  async editSource(
+    @Principal() principal: RequestPrincipal,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const input = createKnowledgeSourceSchema
+      .extend({ expectedVersion: z.number().int().positive() })
+      .parse(body);
+    const current = (await this.store.listKnowledge(principal.tenantId)).find(
+      (source) => source.id === id,
+    );
+    if (!current || current.version !== input.expectedVersion)
+      throw new BadRequestException("La fonte è cambiata: ricaricala prima di salvare");
+    return this.store.changeKnowledge(
+      principal.tenantId,
+      id,
+      "draft",
+      createKnowledgeSourceSchema.parse(input),
+      input.expectedVersion,
+    );
+  }
+
+  @Post(":id/retire")
+  @Roles("owner", "admin")
+  retire(@Principal() principal: RequestPrincipal, @Param("id") id: string, @Body() body: unknown) {
+    return this.store.changeKnowledge(
+      principal.tenantId,
+      id,
+      "retired",
+      {},
+      decisionRequestSchema.parse(body).expectedVersion,
+    );
+  }
+
   @Post(":id/approve")
   @Roles("owner", "admin")
-  approve(@Principal() principal: RequestPrincipal, @Param("id") id: string) {
-    const result = this.store.approveKnowledge(principal.tenantId, id);
-    this.store.appendAudit(principal, "knowledge.approved", "knowledge", id, {
+  async approve(
+    @Principal() principal: RequestPrincipal,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
+    const result = await this.knowledge.approve(
+      principal.tenantId,
+      id,
+      decisionRequestSchema.parse(body).expectedVersion,
+    );
+    await this.store.appendAudit(principal, "knowledge.approved", "knowledge", id, {
       version: result.version,
     });
     return result;
@@ -146,8 +225,8 @@ export class AutomationController {
   constructor(private readonly store: MemoryStore) {}
 
   @Get()
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listRules(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listRules(principal.tenantId) };
   }
 
   @Post()
@@ -156,16 +235,56 @@ export class AutomationController {
     return this.store.createRule(principal.tenantId, createAutomationRuleSchema.parse(body));
   }
 
+  @Post("simulate")
+  async simulate(@Principal() principal: RequestPrincipal, @Body() body: unknown) {
+    const { reviewId } = z.object({ reviewId: z.string().uuid() }).parse(body);
+    const review = await this.store.getReview(principal.tenantId, reviewId);
+    if (!review.activeDraft || !review.validation)
+      throw new BadRequestException("Genera e valida una bozza prima della simulazione");
+    const rules = await this.store.listRules(principal.tenantId);
+    return decideAutomation({
+      review,
+      draft: review.activeDraft,
+      validation: review.validation,
+      rules,
+      approvedManualCount: await this.store.manualApprovalCount(
+        principal.tenantId,
+        review.snapshot.locationId,
+      ),
+      sentTodayByRule: await this.store.sentTodayByRule(
+        principal.tenantId,
+        rules.map((rule) => rule.id),
+      ),
+      globalKillSwitch:
+        (await this.store.getSettings(principal.tenantId)).killSwitch ||
+        process.env.AUTOMATION_RELEASE_APPROVED !== "true",
+    });
+  }
+
   @Post(":id/enable")
   @Roles("owner")
-  enable(@Principal() principal: RequestPrincipal, @Param("id") id: string, @Body() body: unknown) {
+  async enable(
+    @Principal() principal: RequestPrincipal,
+    @Param("id") id: string,
+    @Body() body: unknown,
+  ) {
     enableAutomationRuleSchema.parse(body);
     if (!principal.mfaVerified)
       throw new BadRequestException("MFA is required to enable automation");
-    const rule = this.store.enableRule(principal, id);
-    this.store.appendAudit(principal, "rule.enabled", "automation_rule", id, {
+    if (process.env.AUTOMATION_RELEASE_APPROVED !== "true")
+      throw new BadRequestException("Automatic publication is not released; use manual approval");
+    const rule = await this.store.enableRule(principal, id);
+    await this.store.appendAudit(principal, "rule.enabled", "automation_rule", id, {
       consentVersion: rule.consentVersion,
     });
+    return rule;
+  }
+
+  @Post(":id/disable")
+  @Roles("owner")
+  async disable(@Principal() principal: RequestPrincipal, @Param("id") id: string) {
+    const rule = await this.store.setRuleEnabled(principal, id, false);
+    await this.store.appendAudit(principal, "rule.disabled", "automation_rule", id);
     return rule;
   }
 }
@@ -177,8 +296,8 @@ export class AuditController {
 
   @Get()
   @Roles("owner", "admin")
-  list(@Principal() principal: RequestPrincipal) {
-    return { data: this.store.listAudit(principal.tenantId) };
+  async list(@Principal() principal: RequestPrincipal) {
+    return { data: await this.store.listAudit(principal.tenantId) };
   }
 }
 
@@ -199,16 +318,27 @@ export class IntegrationsController {
   constructor(
     @Inject(GOOGLE_GATEWAY) private readonly google: GoogleBusinessGateway,
     private readonly store: MemoryStore,
+    private readonly integrations: IntegrationService,
   ) {}
 
   @Get("start")
   @Roles("owner")
   @ApiOperation({ summary: "Start Google Business Profile OAuth" })
-  start(@Principal() principal: RequestPrincipal) {
+  async start(@Principal() principal: RequestPrincipal) {
+    const nonce = crypto.randomUUID();
+    await this.store.repository.put(
+      principal.tenantId,
+      "oauth",
+      nonce,
+      { userId: principal.userId },
+      null,
+      new Date(Date.now() + 10 * 60_000).toISOString(),
+    );
     const state = signState({
       tenantId: principal.tenantId,
       userId: principal.userId,
       issuedAt: Date.now(),
+      nonce,
     });
     return { authorizationUrl: this.google.buildAuthorizationUrl(state) };
   }
@@ -218,9 +348,28 @@ export class IntegrationsController {
   @Redirect(process.env.WEB_ORIGIN ?? "http://localhost:3000/settings", 302)
   async callback(@Query("code") code: string, @Query("state") state: string) {
     const payload = verifyState(state);
+    const record = await this.store.repository.get<{ userId: string; consumed?: boolean }>(
+      payload.tenantId,
+      "oauth",
+      payload.nonce,
+    );
+    if (
+      !record ||
+      record.value.userId !== payload.userId ||
+      record.value.consumed ||
+      !(await this.store.repository.put(
+        payload.tenantId,
+        "oauth",
+        payload.nonce,
+        { userId: payload.userId, consumed: true },
+        record.version,
+      ))
+    )
+      throw new BadRequestException("OAuth session is expired or already used");
+    if (!code) throw new BadRequestException("Google authorization was cancelled");
     const tokens = await this.google.exchangeCode(code);
-    this.store.setGoogleTokens(payload.tenantId, tokens);
-    this.store.appendAudit(
+    await this.store.setGoogleTokens(payload.tenantId, tokens);
+    await this.store.appendAudit(
       { tenantId: payload.tenantId, userId: payload.userId },
       "integration.connected",
       "google_connection",
@@ -229,6 +378,36 @@ export class IntegrationsController {
     return {
       url: `${process.env.WEB_ORIGIN ?? "http://localhost:3000"}/settings?google=connected`,
     };
+  }
+
+  @Get("discover")
+  @Roles("owner")
+  discover(@Principal() principal: RequestPrincipal) {
+    return this.integrations.discover(principal);
+  }
+
+  @Post("import-location")
+  @Roles("owner")
+  importLocation(@Principal() principal: RequestPrincipal, @Body() body: unknown) {
+    const input = z
+      .object({ accountName: z.string(), locationName: z.string(), consent: z.literal(true) })
+      .parse(body);
+    return this.integrations.importLocation(principal, input.accountName, input.locationName);
+  }
+
+  @Post("sync")
+  @Roles("owner", "admin")
+  sync(@Principal() principal: RequestPrincipal, @Body() body: unknown) {
+    const input = z
+      .object({ locationId: z.string(), pageToken: z.string().max(4000).optional() })
+      .parse(body);
+    return this.integrations.sync(principal, input.locationId, input.pageToken);
+  }
+
+  @Post("disconnect")
+  @Roles("owner")
+  disconnect(@Principal() principal: RequestPrincipal) {
+    return this.integrations.disconnect(principal);
   }
 }
 
@@ -255,19 +434,55 @@ export class GoogleWebhookController {
       mfaVerified: true,
     };
     const envelope = pubSubEnvelopeSchema.parse(body);
-    if (!this.store.claimEvent(envelope.message.messageId)) return { duplicate: true };
     const notification = googleReviewNotificationSchema.parse(
       JSON.parse(Buffer.from(envelope.message.data, "base64").toString("utf8")),
     );
-    const token = await currentAccessToken(this.store, this.google, principal.tenantId);
-    const snapshot = await this.google.getReview(token, notification.reviewName);
-    const review = await this.reviews.ingestAndGenerate(principal, snapshot);
-    return { accepted: true, reviewId: review.id };
+    const location = (await this.store.listLocations(principal.tenantId)).find(
+      (entry) =>
+        entry.active &&
+        `${entry.googleAccountName}/${entry.googleLocationName}/reviews/` ===
+          `${notification.reviewName.split("/reviews/")[0]}/reviews/`,
+    );
+    if (process.env.GOOGLE_MODE === "live" && !location)
+      return { ignored: true, reason: "location_not_connected" };
+    if (!(await this.store.claimEvent(principal.tenantId, envelope.message.messageId)))
+      return { duplicate: true };
+    try {
+      const token = await currentAccessToken(this.store, this.google, principal.tenantId);
+      const snapshot = await this.google.getReview(token, notification.reviewName);
+      const review = await this.reviews.ingestAndGenerate(
+        principal,
+        {
+          ...snapshot,
+          locationId: location?.id ?? snapshot.locationId,
+        },
+        notification.notificationType === "UPDATED_REVIEW",
+      );
+      await this.store.completeEvent(principal.tenantId, envelope.message.messageId);
+      return { accepted: true, reviewId: review.id };
+    } catch (error) {
+      await this.store.releaseEvent(principal.tenantId, envelope.message.messageId);
+      throw error;
+    }
   }
 
   @Post("demo")
-  async demo(@Principal() principal: RequestPrincipal) {
-    return this.reviews.ingestAndGenerate(principal, DEMO_SNAPSHOTS[1] as ReviewSnapshot);
+  async demo(@Principal() principal: RequestPrincipal, @Body() body: unknown) {
+    if (process.env.NODE_ENV === "production" || process.env.GOOGLE_MODE === "live")
+      throw new BadRequestException("Demo ingestion is disabled");
+    const snapshot =
+      body && Object.keys(body).length
+        ? reviewSnapshotSchema.parse(body)
+        : {
+            ...DEMO_SNAPSHOTS[1],
+            googleReviewName: `accounts/demo/locations/demo/reviews/${crypto.randomUUID()}`,
+            createTime: new Date().toISOString(),
+            updateTime: new Date().toISOString(),
+          };
+    if (!(this.google instanceof FakeGoogleBusinessClient))
+      throw new BadRequestException("Mock adapter is required");
+    this.google.putReview(snapshot);
+    return this.reviews.ingestAndGenerate(principal, snapshot);
   }
 }
 
@@ -276,12 +491,16 @@ async function currentAccessToken(
   google: GoogleBusinessGateway,
   tenantId: string,
 ): Promise<string> {
-  const current = store.getGoogleTokens(tenantId);
-  if (!current) return "demo-access-token";
+  const current = await store.getGoogleTokens(tenantId);
+  if (!current) {
+    if (process.env.GOOGLE_MODE !== "live" && process.env.NODE_ENV !== "production")
+      return "demo-access-token";
+    throw new UnauthorizedException("Connect Google before continuing");
+  }
   if (current.expiresAt > Date.now()) return current.accessToken;
   if (!current.refreshToken) throw new UnauthorizedException("Google connection must be renewed");
   const refreshed = await google.refreshAccessToken(current.refreshToken);
-  store.setGoogleTokens(tenantId, refreshed);
+  await store.setGoogleTokens(tenantId, refreshed);
   return refreshed.accessToken;
 }
 
@@ -294,7 +513,26 @@ const internalPublishSchema = z.object({
 @ApiTags("internal")
 @Controller("internal/reviews")
 export class InternalReviewsController {
-  constructor(private readonly reviews: ReviewService) {}
+  constructor(
+    private readonly reviews: ReviewService,
+    private readonly store: MemoryStore,
+    private readonly notifications: ReviewNotificationService,
+  ) {}
+
+  @Post("retry-notifications")
+  @Public()
+  retryNotifications(@Headers("x-reviewguard-worker-secret") suppliedSecret: string | undefined) {
+    verifyWorkerSecret(suppliedSecret);
+    return this.notifications.retryPending(process.env.GOOGLE_WEBHOOK_TENANT_ID ?? DEMO_TENANT_ID);
+  }
+
+  @Post("purge-expired-google-content")
+  @Public()
+  async purge(@Headers("x-reviewguard-worker-secret") suppliedSecret: string | undefined) {
+    verifyWorkerSecret(suppliedSecret);
+    const tenantId = process.env.GOOGLE_WEBHOOK_TENANT_ID ?? DEMO_TENANT_ID;
+    return { purged: await this.store.repository.purgeExpired(tenantId) };
+  }
 
   @Post(":id/publish")
   @Public()
@@ -319,13 +557,23 @@ export class InternalReviewsController {
   }
 }
 
-function signState(payload: { tenantId: string; userId: string; issuedAt: number }): string {
+function signState(payload: {
+  tenantId: string;
+  userId: string;
+  issuedAt: number;
+  nonce: string;
+}): string {
   const encoded = Buffer.from(JSON.stringify(payload)).toString("base64url");
   const signature = createHmac("sha256", oauthStateSecret()).update(encoded).digest("base64url");
   return `${encoded}.${signature}`;
 }
 
-function verifyState(state: string): { tenantId: string; userId: string; issuedAt: number } {
+function verifyState(state: string): {
+  tenantId: string;
+  userId: string;
+  issuedAt: number;
+  nonce: string;
+} {
   const [encoded, signature] = state.split(".");
   if (!encoded || !signature) throw new BadRequestException("Invalid OAuth state");
   const expected = createHmac("sha256", oauthStateSecret()).update(encoded).digest();
@@ -333,12 +581,15 @@ function verifyState(state: string): { tenantId: string; userId: string; issuedA
   if (received.length !== expected.length || !timingSafeEqual(received, expected)) {
     throw new BadRequestException("Invalid OAuth state signature");
   }
-  const payload = JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")) as {
-    tenantId: string;
-    userId: string;
-    issuedAt: number;
-  };
-  if (Date.now() - payload.issuedAt > 10 * 60_000)
+  const payload = z
+    .object({
+      tenantId: z.string().uuid(),
+      userId: z.string().uuid(),
+      nonce: z.string().uuid(),
+      issuedAt: z.number(),
+    })
+    .parse(JSON.parse(Buffer.from(encoded, "base64url").toString("utf8")));
+  if (Date.now() - payload.issuedAt > 10 * 60_000 || payload.issuedAt > Date.now() + 5000)
     throw new BadRequestException("Expired OAuth state");
   return payload;
 }

@@ -48,6 +48,20 @@ describe("ReviewGuard API", () => {
     expect(response.statusCode).toBe(409);
     expect(response.json().error).toBe("version_conflict");
   });
+  it("paginates the inbox without dropping or repeating reviews", async () => {
+    const first = (await app.inject({ method: "GET", url: "/v1/reviews?limit=2" })).json();
+    expect(first.data).toHaveLength(2);
+    expect(first.meta.total).toBe(3);
+    const second = (
+      await app.inject({
+        method: "GET",
+        url: `/v1/reviews?limit=2&cursor=${first.meta.nextCursor}`,
+      })
+    ).json();
+    expect(second.data).toHaveLength(1);
+    expect(second.meta.nextCursor).toBeNull();
+    expect(new Set([...first.data, ...second.data].map((entry) => entry.id)).size).toBe(3);
+  });
 
   it("publishes an approved reply after the canonical Google re-read", async () => {
     const response = await app.inject({

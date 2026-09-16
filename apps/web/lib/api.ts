@@ -1,16 +1,16 @@
 import type { ReviewCase } from "@reviewguard/contracts";
 
-export const apiBase = process.env.NEXT_PUBLIC_API_URL ?? "http://localhost:4100/v1";
+export const apiBase = "/api/backend";
 
 const demoHeaders = {
   "Content-Type": "application/json",
-  "x-role": "owner",
-  "x-mfa-verified": "true",
 };
 
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
+    signal: init?.signal ?? AbortSignal.timeout(95_000),
+    cache: "no-store",
     headers: { ...demoHeaders, ...init?.headers },
   });
   if (!response.ok) {

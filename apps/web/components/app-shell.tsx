@@ -1,45 +1,53 @@
+"use client";
 import Link from "next/link";
+import { usePathname, useRouter } from "next/navigation";
 import type { ReactNode } from "react";
+import { useSession } from "./auth-gate";
 import { Icon } from "./icons";
 
 const navigation = [
   { href: "/", label: "Panoramica", icon: "home" },
-  { href: "/#inbox", label: "Recensioni", icon: "inbox", badge: "3" },
+  { href: "/inbox", label: "Recensioni", icon: "inbox" },
   { href: "/knowledge", label: "Memoria AI", icon: "brain" },
   { href: "/rules", label: "Automazioni", icon: "bolt" },
   { href: "/settings", label: "Impostazioni", icon: "settings" },
+  { href: "/audit", label: "Registro attività", icon: "shield" },
 ];
 
 export function AppShell({ children }: { children: ReactNode }) {
+  const session = useSession();
+  const pathname = usePathname();
+  const router = useRouter();
   return (
     <div className="app-frame">
       <aside className="sidebar">
-        <Link href="/" className="brand" aria-label="ReviewGuard home">
+        <Link href="/" className="brand" aria-label="AutoReview home">
           <span className="brand-mark">
             <Icon name="shield" />
           </span>
           <span>
-            Review<span>Guard</span>
+            Auto<span>Review</span>
           </span>
         </Link>
         <div className="workspace-card">
           <div className="workspace-logo">DL</div>
           <div>
-            <strong>Demo Location</strong>
-            <span>Milano · 1 sede</span>
+            <strong>{session?.demo ? "Ambiente dimostrativo" : "La tua attività"}</strong>
+            <span>
+              {session?.demo ? "Nessun invio reale a Google" : "Approvazione controllata"}
+            </span>
           </div>
           <span className="workspace-chevron">⌄</span>
         </div>
         <nav aria-label="Navigazione principale">
-          {navigation.map((item, index) => (
+          {navigation.map((item) => (
             <Link
-              className={index === 0 ? "nav-item active" : "nav-item"}
+              className={pathname === item.href ? "nav-item active" : "nav-item"}
               href={item.href}
               key={item.label}
             >
               <Icon name={item.icon} />
               <span>{item.label}</span>
-              {item.badge ? <em>{item.badge}</em> : null}
             </Link>
           ))}
         </nav>
@@ -54,10 +62,26 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="profile-row">
             <div className="avatar">DV</div>
             <div>
-              <strong>Demo Owner</strong>
-              <span>Owner · MFA attiva</span>
+              <strong>{session?.principal.role ?? "Account"}</strong>
+              <span>
+                {session?.demo
+                  ? "Sessione demo"
+                  : session?.principal.mfaVerified
+                    ? "MFA verificata"
+                    : "MFA da completare"}
+              </span>
             </div>
-            <span>•••</span>
+            <button
+              type="button"
+              className="text-button"
+              onClick={async () => {
+                await fetch("/api/session", { method: "DELETE" });
+                router.replace("/login");
+                router.refresh();
+              }}
+            >
+              Esci
+            </button>
           </div>
         </div>
       </aside>
