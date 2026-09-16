@@ -6,6 +6,7 @@ import type {
   KnowledgeSource,
   RequestPrincipal,
   ReviewCase,
+  ReviewListQuery,
   ReviewSnapshot,
 } from "@reviewguard/contracts";
 import type { GoogleTokens } from "@reviewguard/core";
@@ -31,10 +32,16 @@ export class MemoryStore {
   private readonly manualApprovalsByLocation = new Map<string, number>();
   private readonly publishedTodayByRule = new Map<string, { date: string; count: number }>();
 
-  listReviews(tenantId: string, status?: ReviewCase["status"]): ReviewCase[] {
+  listReviews(tenantId: string, filters: ReviewListQuery = { limit: 50 }): ReviewCase[] {
     return [...this.reviews.values()]
-      .filter((review) => review.tenantId === tenantId && (!status || review.status === status))
+      .filter(
+        (review) =>
+          review.tenantId === tenantId &&
+          (!filters.status || review.status === filters.status) &&
+          (!filters.locationId || review.snapshot.locationId === filters.locationId),
+      )
       .sort((left, right) => right.createdAt.localeCompare(left.createdAt))
+      .slice(0, filters.limit)
       .map((review) => structuredClone(review));
   }
 
