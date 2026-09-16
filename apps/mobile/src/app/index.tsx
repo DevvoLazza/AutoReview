@@ -25,6 +25,8 @@ export default function InboxScreen() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [count, setCount] = useState(0);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [moreLoading, setMoreLoading] = useState(false);
   const load = useCallback(async () => {
     setError(null);
     try {
@@ -33,6 +35,7 @@ export default function InboxScreen() {
         request<{ locations: Array<{ manualApprovalCount: number }> }>("/workspace"),
       ]);
       setReviews(result.data);
+      setNextCursor(result.nextCursor);
       setLive(result.live);
       setCount(workspace.locations[0]?.manualApprovalCount ?? 0);
     } catch (reason) {
@@ -136,6 +139,32 @@ export default function InboxScreen() {
           </Text>
         )}
         {!error && reviews.map((review) => <ReviewCard review={review} key={review.id} />)}
+        {!error && nextCursor && (
+          <Pressable
+            accessibilityRole="button"
+            disabled={moreLoading}
+            onPress={async () => {
+              setMoreLoading(true);
+              try {
+                const result = await listReviews(nextCursor);
+                setReviews((previous) => [
+                  ...new Map(
+                    [...previous, ...result.data].map((entry) => [entry.id, entry]),
+                  ).values(),
+                ]);
+                setNextCursor(result.nextCursor);
+              } catch (reason) {
+                setError(reason instanceof Error ? reason.message : "Caricamento non riuscito");
+              } finally {
+                setMoreLoading(false);
+              }
+            }}
+          >
+            <Text style={styles.subtitle}>
+              {moreLoading ? "Caricamento…" : "Carica altre recensioni"}
+            </Text>
+          </Pressable>
+        )}
         <Pressable
           accessibilityRole="button"
           onPress={async () => {

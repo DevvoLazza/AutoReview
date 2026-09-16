@@ -7,7 +7,9 @@ export const demoMode = process.env.EXPO_PUBLIC_AUTH_MODE === "demo" && __DEV__;
 export const identity = () => new IdentityClient(process.env.EXPO_PUBLIC_IDENTITY_API_KEY ?? "");
 let session: IdentitySession | null = null;
 let loaded = false;
-let refreshing: Promise<IdentitySession> | null = null;
+let refreshing: Promise<string | null> | null = null;
+let generation = 0;
+let writes: Promise<void> = Promise.resolve();
 const listeners = new Set<() => void>();
 export function subscribeSession(listener: () => void) {
   listeners.add(listener);
@@ -35,13 +37,22 @@ async function write(value: string | null) {
     });
   else await SecureStore.deleteItemAsync(key);
 }
+function persist(value: string | null) {
+  const operation = writes.then(() => write(value));
+  // Keep the queue usable after a failure; the original operation still rejects to its caller.
+  writes = operation.catch(() => undefined);
+  return operation;
+}
 export async function restoreSession() {
   if (!loaded) {
+    const current = generation;
     try {
+      await writes;
       const value = await read();
+      if (current !== generation) return session;
       session = value ? JSON.parse(value) : null;
     } catch {
-      session = null;
+      if (current === generation) session = null;
     }
     loaded = true;
     notify();
@@ -49,30 +60,48 @@ export async function restoreSession() {
   return session;
 }
 export async function saveSession(value: IdentitySession) {
-  await write(JSON.stringify(value));
+  const current = ++generation;
+  refreshing = null;
+  await persist(JSON.stringify(value));
+  if (current !== generation) return;
   session = value;
   loaded = true;
   notify();
 }
 export async function signOut() {
-  await write(null);
+  generation++;
+  refreshing = null;
   session = null;
   loaded = true;
   notify();
+  await persist(null);
 }
 export async function accessToken() {
   await restoreSession();
   if (!session) return null;
   if (session.expiresAt > Date.now() + 60_000) return session.idToken;
+  if (!refreshing) {
+    const current = generation;
+    const refreshToken = session.refreshToken;
+    refreshing = (async () => {
+      try {
+        const value = await identity().refresh(refreshToken);
+        if (current !== generation) return null;
+        await persist(JSON.stringify(value));
+        if (current !== generation) return null;
+        session = value;
+        notify();
+        return value.idToken;
+      } catch (error) {
+        if (current === generation) await signOut();
+        throw error;
+      }
+    })();
+  }
+  const pending = refreshing;
   try {
-    if (!refreshing) refreshing = identity().refresh(session.refreshToken);
-    const value = await refreshing;
-    await saveSession(value);
-    return value.idToken;
-  } catch (error) {
-    await signOut();
-    throw error;
+    return await pending;
   } finally {
-    refreshing = null;
+    if (refreshing === pending) refreshing = null;
   }
 }

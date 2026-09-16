@@ -9,6 +9,7 @@ const demoHeaders = {
 export async function apiRequest<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBase}${path}`, {
     ...init,
+    signal: init?.signal ?? AbortSignal.timeout(95_000),
     cache: "no-store",
     headers: { ...demoHeaders, ...init?.headers },
   });

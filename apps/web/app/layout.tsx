@@ -4,7 +4,7 @@ import { SiteFrame } from "@/components/auth-gate";
 import "./globals.css";
 
 export const metadata: Metadata = {
-  title: "ReviewGuard · AI review operations",
+  title: "AutoReview · AI review operations",
   description: "Risposte AI controllate alle recensioni Google Business Profile.",
 };
 

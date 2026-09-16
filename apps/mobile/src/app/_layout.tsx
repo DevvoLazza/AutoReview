@@ -2,7 +2,7 @@ import * as Notifications from "expo-notifications";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import { useEffect, useState } from "react";
-import { ActivityIndicator, View } from "react-native";
+import { ActivityIndicator, Text, View } from "react-native";
 import { accessToken, demoMode, restoreSession, subscribeSession } from "@/lib/session";
 import { colors } from "@/lib/theme";
 
@@ -12,6 +12,7 @@ export default function RootLayout() {
   const [ready, setReady] = useState(false);
   const [authenticated, setAuthenticated] = useState(demoMode);
   const [pendingRoute, setPendingRoute] = useState<string | null>(null);
+  const [notificationError, setNotificationError] = useState(false);
   useEffect(() => {
     const refresh = async () => {
       try {
@@ -24,7 +25,9 @@ export default function RootLayout() {
       }
     };
     const unsubscribe = subscribeSession(() => {
-      void restoreSession().then((value) => setAuthenticated(demoMode || Boolean(value)));
+      void restoreSession()
+        .then((value) => setAuthenticated(demoMode || Boolean(value)))
+        .catch(() => setAuthenticated(false));
     });
     void refresh();
     return unsubscribe;
@@ -38,7 +41,9 @@ export default function RootLayout() {
     } else if (authenticated && pendingRoute) {
       router.replace(pendingRoute as never);
       setPendingRoute(null);
-      void Notifications.clearLastNotificationResponseAsync();
+      void Notifications.clearLastNotificationResponseAsync().catch(() =>
+        setNotificationError(true),
+      );
     } else if (authenticated && segments[0] === "login") router.replace("/");
   }, [ready, authenticated, segments, pendingRoute, router]);
   useEffect(() => {
@@ -50,10 +55,12 @@ export default function RootLayout() {
       const route = response.notification.request.content.data?.route;
       accept(route);
     });
-    Notifications.getLastNotificationResponseAsync().then((response) => {
-      const route = response?.notification.request.content.data?.route;
-      accept(route);
-    });
+    Notifications.getLastNotificationResponseAsync()
+      .then((response) => {
+        const route = response?.notification.request.content.data?.route;
+        accept(route);
+      })
+      .catch(() => setNotificationError(true));
     return () => subscription.remove();
   }, []);
   if (!ready)
@@ -73,6 +80,14 @@ export default function RootLayout() {
   return (
     <>
       <StatusBar style="dark" />
+      {notificationError && (
+        <Text
+          accessibilityRole="alert"
+          style={{ color: colors.muted, padding: 12, backgroundColor: colors.background }}
+        >
+          Notifiche non disponibili: consulta l’inbox per le nuove recensioni.
+        </Text>
+      )}
       <Stack
         screenOptions={{
           headerStyle: { backgroundColor: colors.background },

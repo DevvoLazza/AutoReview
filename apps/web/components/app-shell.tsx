@@ -21,12 +21,12 @@ export function AppShell({ children }: { children: ReactNode }) {
   return (
     <div className="app-frame">
       <aside className="sidebar">
-        <Link href="/" className="brand" aria-label="ReviewGuard home">
+        <Link href="/" className="brand" aria-label="AutoReview home">
           <span className="brand-mark">
             <Icon name="shield" />
           </span>
           <span>
-            Review<span>Guard</span>
+            Auto<span>Review</span>
           </span>
         </Link>
         <div className="workspace-card">

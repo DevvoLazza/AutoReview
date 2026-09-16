@@ -10,9 +10,12 @@ import { StatusBadge } from "./status-badge";
 
 export function Inbox() {
   const [status, setStatus] = useState("");
-  const { data, error, loading, refresh } = useResource<{ data: ReviewCase[] }>(
-    `/reviews?limit=100${status ? `&status=${status}` : ""}`,
-  );
+  const [cursors, setCursors] = useState<string[]>([]);
+  const cursor = cursors.at(-1);
+  const { data, error, loading, refresh } = useResource<{
+    data: ReviewCase[];
+    meta: { total: number; nextCursor: string | null };
+  }>(`/reviews?limit=50${status ? `&status=${status}` : ""}${cursor ? `&cursor=${cursor}` : ""}`);
   const reviews = data?.data ?? [];
 
   return (
@@ -26,7 +29,10 @@ export function Inbox() {
           <select
             aria-label="Filtra recensioni per stato"
             value={status}
-            onChange={(event) => setStatus(event.target.value)}
+            onChange={(event) => {
+              setStatus(event.target.value);
+              setCursors([]);
+            }}
           >
             <option value="">Tutti gli stati</option>
             <option value="received">Da generare</option>
@@ -80,7 +86,31 @@ export function Inbox() {
           ))}
       </div>
       <div className="panel-footer">
-        <span>Mostrate {reviews.length} recensioni operative</span>
+        <span>
+          Mostrate {reviews.length} di {data?.meta.total ?? 0} recensioni · pagina{" "}
+          {cursors.length + 1}
+        </span>
+        <div className="panel-actions">
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={loading || !cursors.length}
+            onClick={() => setCursors((previous) => previous.slice(0, -1))}
+          >
+            Precedenti
+          </button>
+          <button
+            type="button"
+            className="ghost-button"
+            disabled={loading || !data?.meta.nextCursor}
+            onClick={() => {
+              if (data?.meta.nextCursor)
+                setCursors((previous) => [...previous, data.meta.nextCursor as string]);
+            }}
+          >
+            Successive
+          </button>
+        </div>
         <small>Le nuove recensioni restano nell’inbox anche senza notifica push.</small>
       </div>
     </section>

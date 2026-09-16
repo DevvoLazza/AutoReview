@@ -21,11 +21,20 @@ test("knowledge creation, approval, retirement and preferences are backed by the
   await page
     .getByRole("textbox", { name: "Tono di voce", exact: true })
     .fill("Clear, concise and professional");
-  await page.getByRole("button", { name: "Salva preferenze" }).click();
+  await page.getByRole("button", { name: "Salva preferenze", exact: true }).click();
   await expect(page.getByText("Preferenze salvate", { exact: true })).toBeVisible();
   await page.reload();
   await expect(page.getByRole("textbox", { name: "Tono di voce", exact: true })).toHaveValue(
     "Clear, concise and professional",
+  );
+  await page
+    .getByRole("textbox", { name: "Tono della sede", exact: true })
+    .fill("Warm and concise");
+  await page.getByRole("button", { name: "Salva preferenze della sede", exact: true }).click();
+  await expect(page.getByText("Preferenze della sede salvate", { exact: true })).toBeVisible();
+  await page.reload();
+  await expect(page.getByRole("textbox", { name: "Tono della sede", exact: true })).toHaveValue(
+    "Warm and concise",
   );
 });
 

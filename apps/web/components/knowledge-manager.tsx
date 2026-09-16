@@ -267,7 +267,7 @@ export function KnowledgeManager() {
                     Modifica
                   </button>
                 )}
-                {canApprove && entry.status !== "approved" && (
+                {canApprove && (
                   <button
                     type="button"
                     className="secondary-button"
@@ -283,7 +283,7 @@ export function KnowledgeManager() {
                       )
                     }
                   >
-                    Approva fonte
+                    {entry.status === "approved" ? "Reindicizza fonte" : "Approva fonte"}
                   </button>
                 )}
                 {canApprove && entry.status !== "retired" && (

@@ -27,9 +27,13 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export async function listReviews(): Promise<{ data: ReviewCase[]; live: boolean }> {
-  const result = await request<{ data: ReviewCase[] }>("/reviews?limit=100");
-  return { data: result.data, live: !demoMode };
+export async function listReviews(
+  cursor?: string,
+): Promise<{ data: ReviewCase[]; live: boolean; nextCursor: string | null }> {
+  const result = await request<{ data: ReviewCase[]; meta: { nextCursor: string | null } }>(
+    `/reviews?limit=50${cursor ? `&cursor=${cursor}` : ""}`,
+  );
+  return { data: result.data, live: !demoMode, nextCursor: result.meta.nextCursor };
 }
 
 export async function getReview(id: string): Promise<ReviewCase> {

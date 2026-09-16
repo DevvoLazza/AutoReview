@@ -5,8 +5,8 @@ import { apiRequest } from "@/lib/api";
 import { useResource } from "@/lib/use-resource";
 import type { Workspace } from "@/lib/workspace";
 import { useSession } from "./auth-gate";
-import { ResourceState } from "./resource-state";
 import { LocationPreferences } from "./location-preferences";
+import { ResourceState } from "./resource-state";
 
 type Discovery = {
   data: Array<{
@@ -210,15 +210,33 @@ export function SettingsManager() {
                         });
                         total += result.imported;
                         nextPageToken = result.nextPageToken ?? undefined;
-                        setSyncCursors(current => ({ ...current, [location.id]: nextPageToken }));
+                        setSyncCursors((current) => ({ ...current, [location.id]: nextPageToken }));
                       } while (nextPageToken && total < 5000);
-                      setNotice(`${total} recensioni importate. ${nextPageToken ? "Clicca Riprendi importazione per continuare." : "Le nuove bozze richiedono approvazione."}`);
+                      setNotice(
+                        `${total} recensioni importate. ${nextPageToken ? "Clicca Riprendi importazione per continuare." : "Le nuove bozze richiedono approvazione."}`,
+                      );
                     }, "")
                   }
                 >
                   {syncCursors[location.id] ? "Riprendi importazione" : "Importa recensioni"}
                 </button>
-                {["owner", "admin"].includes(data.principal.role) && <LocationPreferences key={`${location.id}/${location.tone}/${location.defaultLanguage}`} location={location} disabled={busy} save={value => void execute(() => apiRequest(`/locations/${location.id}/settings`, { method: "POST", body: JSON.stringify(value) }), "Preferenze della sede salvate")} />}
+                {["owner", "admin"].includes(data.principal.role) && (
+                  <LocationPreferences
+                    key={`${location.id}/${location.tone}/${location.defaultLanguage}`}
+                    location={location}
+                    disabled={busy}
+                    save={(value) =>
+                      void execute(
+                        () =>
+                          apiRequest(`/locations/${location.id}/settings`, {
+                            method: "POST",
+                            body: JSON.stringify(value),
+                          }),
+                        "Preferenze della sede salvate",
+                      )
+                    }
+                  />
+                )}
               </div>
             ))}
           </section>

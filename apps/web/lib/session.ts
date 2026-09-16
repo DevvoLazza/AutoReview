@@ -1,8 +1,10 @@
+import "server-only";
 import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 import { IdentityClient, type IdentitySession } from "@reviewguard/core";
 import { cookies } from "next/headers";
 
 const name = "autoreview_session";
+const refreshes = new Map<string, Promise<IdentitySession>>();
 function key(): Buffer {
   const value = process.env.AUTH_COOKIE_SECRET;
   if (!value) throw new Error("AUTH_COOKIE_SECRET is required for real web authentication");
@@ -52,11 +54,19 @@ export async function currentToken(): Promise<string | null> {
   const session = await readSession();
   if (!session) return null;
   if (session.expiresAt > Date.now() + 60_000) return session.idToken;
-  const refreshed = await identity().refresh(session.refreshToken);
-  await writeSession(refreshed);
-  return refreshed.idToken;
+  const pending = refreshes.get(session.refreshToken) ?? identity().refresh(session.refreshToken);
+  refreshes.set(session.refreshToken, pending);
+  // Do not issue Set-Cookie from a background refresh: an older in-flight response
+  // must not recreate a browser session after DELETE /api/session cleared it.
+  // Identity refresh tokens remain valid until account/session revocation.
+  try {
+    return (await pending).idToken;
+  } finally {
+    if (refreshes.get(session.refreshToken) === pending) refreshes.delete(session.refreshToken);
+  }
 }
 export function checkOrigin(request: Request) {
-  if (request.method !== "GET" && request.headers.get("origin") !== new URL(request.url).origin)
+  const expectedOrigin = process.env.WEB_ORIGIN ?? new URL(request.url).origin;
+  if (request.method !== "GET" && request.headers.get("origin") !== expectedOrigin)
     throw new Error("Request origin is not allowed");
 }
