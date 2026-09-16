@@ -26,6 +26,19 @@ describe("ReviewGuard API", () => {
     expect(response.json().data).toHaveLength(3);
   });
 
+  it("applies review list filters and limits", async () => {
+    const limited = await app.inject({ method: "GET", url: "/v1/reviews?limit=1" });
+    const missingLocation = await app.inject({
+      method: "GET",
+      url: "/v1/reviews?locationId=missing-location",
+    });
+
+    expect(limited.statusCode).toBe(200);
+    expect(limited.json().data).toHaveLength(1);
+    expect(missingLocation.statusCode).toBe(200);
+    expect(missingLocation.json().data).toHaveLength(0);
+  });
+
   it("rejects stale approvals", async () => {
     const response = await app.inject({
       method: "POST",

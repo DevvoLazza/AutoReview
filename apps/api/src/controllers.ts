@@ -54,7 +54,7 @@ export class ReviewsController {
   @Get()
   list(@Principal() principal: RequestPrincipal, @Query() query: unknown) {
     const parsed = reviewListQuerySchema.parse(query);
-    return { data: this.reviews.list(principal, parsed.status), meta: { limit: parsed.limit } };
+    return { data: this.reviews.list(principal, parsed), meta: { limit: parsed.limit } };
   }
 
   @Get(":id")
