@@ -1,204 +1,66 @@
 # Engineering security model
 
-This document describes the security properties AutoReview is designed to preserve, the controls currently represented in the codebase, and the gates that remain before a production deployment. Vulnerability reporting instructions are available in the repository-level [Security Policy](../SECURITY.md).
+This document describes implemented boundaries and required live acceptance checks. It is not a certification, legal opinion, or claim that a live deployment has been audited. Report vulnerabilities privately using [SECURITY.md](../SECURITY.md).
 
-## Security objectives
+## Core invariants
 
-AutoReview must preserve the following invariants:
+1. Tenant data is accessed only within the authenticated workspace context.
+2. AI can prepare a draft but cannot authorize or publish it.
+3. Flagged sensitive cases cannot be made automatically eligible through tenant rules.
+4. Concurrent commands and uncertain transport outcomes must not trigger duplicate publication.
+5. Logs and push payloads exclude review, reply, prompt, document and credential contents.
+6. Google-derived content has bounded retention, including publication copies and backups.
 
-1. A tenant cannot read, infer, or modify another tenant’s data.
-2. A reply cannot be published without a valid human approval or an active, eligible automation rule.
-3. Hard-stop conditions cannot be bypassed by a prompt, model output, tenant configuration, or application role.
-4. The AI provider never receives Google credentials, database access, publication tools, or arbitrary network capabilities.
-5. Technical logs do not contain review text, prompts, generated replies, OAuth tokens, or personal data.
-6. Temporary Google content is removed within the applicable retention window.
-7. Every material decision is attributable to an actor, record version, policy version, model, provider endpoint, and knowledge snapshot.
-8. Duplicate events, retries, and concurrent approvals cannot produce duplicate Google replies.
+## Identity and authorization
 
-## Trust boundaries
+The API verifies Identity Platform JWT signature, issuer, audience, expiry, verified email and scoped role claims. A live account lookup additionally rejects disabled users, revoked sessions and changed grants. Account-check failures fail closed. MFA is required for owner/approver mutation commands; read access permits verification and enrollment first.
 
-```mermaid
-flowchart LR
-    GOOGLE[Google Business Profile] -->|Pub/Sub + OIDC| WORKER[Worker]
-    TASKS[Cloud Tasks] -->|OIDC| WORKER
-    WEB[Web dashboard] -->|Identity Platform JWT| API[API]
-    MOBILE[Mobile app] -->|Identity Platform JWT| API
-    WORKER -->|Internal service credential| API
-    API -->|Tenant-scoped transaction| DB[(PostgreSQL)]
-    API -->|Minimal approved context| AI[OpenRouter]
-    API -->|Encrypted OAuth token| GOOGLE
-```
+The dashboard stores encrypted identity credentials in a Secure HttpOnly SameSite cookie in production. Background token refresh does not reset that cookie, preventing a late response from recreating a cleared browser session. Mutation routes check the configured web origin. Native sessions use SecureStore, serialized writes and generation guards so logout wins over pending refreshes; browser mobile previews use session-only storage. No Google/OpenRouter secret is sent to either client. Public registration is disabled; an operator grants roles and revokes prior sessions through the administrator CLI.
 
-- Google Pub/Sub and Cloud Tasks may invoke only the worker identity.
-- The worker validates the Google-issued OIDC token before forwarding a normalized event.
-- The API authenticates users through Identity Platform and authorizes every command by tenant, location, role, and MFA state.
-- PostgreSQL row-level security is a second tenant-isolation boundary, not a replacement for application authorization.
-- The AI provider receives only the review and the smallest relevant set of approved knowledge sources.
-- Google publication is a narrowly scoped operation performed only after canonical revalidation.
+The initial production release accepts only its configured workspace. Every role currently has workspace-wide review read access; there are no per-user location grants. Do not represent it as a granular enterprise team-permissions product.
 
-## Threat model
+## Database boundary
 
-| Threat | Primary controls |
-| --- | --- |
-| Cross-tenant access | Mandatory `tenant_id`, role checks, PostgreSQL RLS, isolation tests |
-| Duplicate publication | Event deduplication, optimistic locking, idempotency keys, canonical reread |
-| Unauthorized automation | Owner-only enablement, MFA, versioned consent, calibration threshold, kill switch |
-| Prompt injection in a review or document | Untrusted-content delimiters, no model tools, structured output, deterministic validation |
-| Unsupported or fabricated claims | Approved-source retrieval, source identifiers, unsupported-claim detection, human review |
-| Sensitive-case automation | Non-bypassable hard stops and mandatory escalation |
-| Stolen Google refresh token | Secret Manager, KMS encryption, restricted service accounts, immediate revocation path |
-| Forged worker invocation | Google OIDC validation, audience verification, internal service credential |
-| Replay or concurrent commands | Record versions, atomic transitions, processed-event registry |
-| Sensitive-data leakage through logs | Structured metadata-only logging and explicit prohibited fields |
-| Dependency or CI compromise | Frozen lockfiles, lifecycle-script allowlist, dependency audit, pinned CI actions |
-| Data retained beyond policy | Expiry timestamp, scheduled purge, operational alerting, disconnect workflow |
+The PostgreSQL repository uses explicit tenant predicates and parameterized transaction-local tenant context. Both runtime tables enable and force RLS. Atomic CAS batches bind state transitions to record versions, including publication intent. The production startup check refuses SUPERUSER, BYPASSRLS, CREATEROLE, CREATEDB, runtime-table ownership and missing forced RLS.
 
-## Authentication and authorization
+Migration credentials and service identity are separate from runtime credentials. The runtime group gets DML only, not schema ownership, TRUNCATE or trigger-management privileges. Audit UPDATE/DELETE is rejected by a trigger. The in-memory adapter is development-only, not a substitute for database enforcement.
 
-### User sessions
+PGlite/pgvector tests verify actual PostgreSQL behavior across tenants, stale versions, rollback, audit mutation and vector-source filtering. A live Cloud SQL/runtime-user test and an isolated TCP PostgreSQL check remain deployment acceptance evidence.
 
-Production requests require an Identity Platform JWT. The API validates issuer, audience, signature, expiry, tenant claim, user identity, role, and MFA state. Demo authentication is accepted only outside production.
+## Google and workflow
 
-The role model is intentionally small:
+OAuth uses an HMAC-signed ten-minute state and a persisted single-use nonce. Live account/location discovery verifies owner-authorized resources; importing a location records explicit consent and configures notifications before activating it. Existing foreign notification-topic configuration is not silently overwritten.
 
-- `Owner`: tenant configuration, team management, consent, automation, and integrations.
-- `Admin`: operational configuration without ownership transfer.
-- `Editor`: draft creation and editing.
-- `Approver`: approval, rejection, and scheduled-publication cancellation.
+Cloud KMS encrypts stored Google token payloads with tenant-bound additional authenticated data. Local persistent development may use a supplied AES-256-GCM key; ephemeral encryption keys are not accepted for durable storage. Tokens are never returned to clients or printed.
 
-Owner and Approver actions require MFA. Enabling an automation rule additionally requires an Owner, a current MFA claim, versioned consent, and the location calibration threshold.
+Before sending, the application rechecks source versions/validity, authorized location and the canonical review. Changed/answered reviews invalidate the draft. Publication state and desired reply intent commit together. A confirmed canonical reply is required for success. An uncertain outcome remains `publishing`, and reconciliation never blindly repeats PUT.
 
-### Service-to-service calls
+Disconnect first enables the kill switch and deactivates locations. It attempts remote notification cleanup/token revocation and immediately removes local tokens and temporary review/publication/device/OAuth/event records. If remote cleanup fails, the UI instructs the owner to revoke access directly in Google; the application does not claim successful remote revocation.
 
-- Pub/Sub and Cloud Tasks use a dedicated push service account.
-- The worker validates Google OIDC issuer, signature, audience, and service-account identity.
-- Worker-to-API requests use a separate rotatable internal credential.
-- Service accounts follow least privilege and are not shared between API, worker, and push delivery.
+## AI and documents
 
-## Tenant isolation
+The model receives delimited untrusted review content and approved knowledge, with no tools or application credentials. Structured output, independent draft validation, deterministic risk patterns, source-ID checks and source-version revalidation are complementary controls—not proof that a model can never fabricate a statement.
 
-Every tenant-owned record carries `tenant_id`. Application queries must include the authenticated tenant even when the caller supplies a globally unique identifier.
+Automatic rules default off. Owner consent, MFA, an operator release gate, location calibration, daily reservations and the global kill switch all apply again at delivery. Reviewed-language/category evaluations are required before enabling automation. Deterministic patterns currently emphasize Italian/English; multilingual model flags are not an exhaustive safety classifier.
 
-PostgreSQL RLS policies use a transaction-local tenant context. Production repository operations must:
+OpenRouter requests demand ZDR, data-collection denial, required-parameter support and a reviewed provider allowlist. Operators must independently confirm selected endpoints, disable optional prompt logging, and validate actual processing regions and DPA/SCC terms. Vertex embeds approved document chunks and review queries; its separate processing region must be included in the data assessment.
 
-1. start a transaction;
-2. set the tenant context using a parameterized statement;
-3. execute all reads and writes within that transaction;
-4. clear the context automatically when the transaction ends.
+PDF/DOCX extraction runs in a separate Node process with a 15-second timeout, bounded V8 heap, minimal environment and ignored parser output streams. Inputs are bounded to 4 MB and text to 250,000 characters; PDFs are capped at 100 pages. Scanned PDFs require external OCR. Process isolation prevents native crashes from terminating the API; it is **not** an OS-level malicious-document sandbox or a total native-memory cap. Originals are not archived.
 
-The schema also uses tenant-aware indexes and foreign keys where appropriate. Cross-tenant integration tests remain a release gate for the PostgreSQL-backed runtime repository.
+## Service identities and notifications
 
-## AI and knowledge security
+Pub/Sub, Tasks and Scheduler invoke the worker using a dedicated Google OIDC identity and Cloud Run IAM. The worker checks issuer, signature, audience and verified service-account email, then uses an independent rotatable credential to call internal API routes. The worker has no database, KMS or Google-token access.
 
-The model is treated as an untrusted drafting component.
+Push payloads contain generic messages and a review UUID route, not customer/review contents. Approval happens only after opening the authenticated screen. Durable retry records contain identifiers and submission metadata; obsolete drafts are not re-notified. Expo ticket errors are inspected and unregistered devices removed. Accepted tickets do not prove device delivery; the inbox remains authoritative.
 
-- It receives no tools, credentials, database client, HTTP client, or publication capability.
-- Reviews and uploaded documents are marked as untrusted content, not instructions.
-- Only approved and currently valid knowledge chunks are eligible for retrieval.
-- Output must satisfy the `ReplyDraft` JSON Schema.
-- A second validation pass checks language, tone, unsupported claims, source coverage, and risk flags.
-- The deterministic hard-stop engine runs independently of the model’s classification.
-- The automation engine consumes validated fields; the model never chooses whether to publish.
-- Human corrections may produce evaluation examples or proposed style rules, but cannot mutate approved knowledge automatically.
+## Retention, logs and recovery
 
-OpenRouter requests use a pinned model snapshot, an explicit provider allowlist, `data_collection: "deny"`, Zero Data Retention routing, and required-parameter enforcement. The selected provider endpoint is recorded in the audit trail without storing prompt content in technical logs.
+Google review aggregates expire after 21 days; reads hide expired content and an hourly job physically removes it. Publication intent expires with the review. Metadata-only audit does not retain prompt/reply copies. Terraform limits backups/PITR to seven days; validate actual cleanup and restored-backup re-purging before asserting Google's retention requirement is satisfied.
 
-## Google integration security
+Fastify/API logs redact authentication and cookies; request serialization excludes OAuth query parameters. Errors log only safe classifications. Never enable response-body, prompt or document logging in middleware, observability integrations or external proxies. Service metrics and audit are not a full OpenTelemetry tracing implementation.
 
-- OAuth authorization uses a signed, short-lived state value.
-- Offline access is requested only after explicit business-owner initiation.
-- Refresh tokens must be encrypted with Cloud KMS before database persistence.
-- Tokens are never returned to web or mobile clients.
-- Before publication, the API retrieves the canonical review again.
-- A changed review, an existing reply, revoked authorization, or a location mismatch moves the case to a safe attention state.
-- Disconnecting a location revokes authorization, removes notification configuration, cancels pending work, and schedules temporary-content deletion.
+Terraform provides private SQL connectivity, service-specific secret access, KMS, backup settings, and initial Cloud Run/DLQ alerts. Remote state must be encrypted/access-controlled because state contains secrets. Confirm alert-channel delivery and add/test purge/Scheduler failure alerts, key rotation, restore and incident-response runbooks before production.
 
-The first production pilot must use one explicitly authorized location with automation disabled.
+## External acceptance gates
 
-## Workflow integrity
-
-Review state changes are explicit and versioned:
-
-```text
-received → generating → pending_approval | scheduled_auto
-         → publishing → published
-         ↘ rejected | needs_attention
-```
-
-Every user command includes `expectedVersion`. Publication uses an idempotency key tied to the review, draft, and version. Pub/Sub message IDs are recorded before processing, and retries are limited to transient failures. Exhausted events move to a dead-letter queue for operator review.
-
-No API route can move directly from `received` to `published`, and no model response can perform a state transition by itself.
-
-## Data protection and retention
-
-### Data minimization
-
-- Push payloads contain identifiers only, never review text.
-- AI requests contain the review and only the knowledge required for that response.
-- Technical logs contain operational metadata rather than business content.
-- Documents remain private and are accessed through service identities.
-
-### Retention
-
-Google-derived review snapshots receive a `content_expires_at` value no later than 30 days after collection. A scheduled purge removes reviewer name, review text, reply text, and other temporary Google content. Minimal non-content audit metadata may be retained when required for security and operational accountability.
-
-The purge job must run at least daily and alert when it is delayed, failing, or unable to delete eligible data.
-
-### Encryption
-
-- TLS is required for all external and service-to-service traffic.
-- Cloud SQL, Cloud Storage, backups, and Secret Manager use encryption at rest.
-- Google refresh tokens use an application-controlled KMS key with rotation and narrowly scoped decrypt permission.
-- Backup and point-in-time recovery settings are represented in Terraform and require restore testing before production.
-
-## Secrets and configuration
-
-- Production secrets belong in Secret Manager and are mounted as runtime environment values.
-- `.env` files, tokens, credentials, and production review data must never enter version control.
-- Secret access is restricted to the service account that requires it.
-- OAuth state secrets, worker credentials, API keys, and database credentials must be independently rotatable.
-- Configuration changes affecting automation or consent require an authenticated actor and an audit event.
-
-## Logging, monitoring, and audit
-
-Technical logs must exclude:
-
-- review text and reviewer identity;
-- prompt and generated-reply content;
-- OAuth access and refresh tokens;
-- authorization headers, cookies, API keys, and document contents.
-
-Operational metrics should cover Pub/Sub backlog, dead-letter volume, OAuth revocation, draft-generation failures, scheduled-task delay, publication failures, purge delay, and unusual cross-tenant authorization failures.
-
-Audit events are append-only. They record the actor, tenant, action, target, record version, policy result, model snapshot, provider endpoint, prompt version, and knowledge-source identifiers. Audit records must not duplicate the sensitive content they describe.
-
-## Controls represented in this repository
-
-- Structured AI input and output validation.
-- Deterministic hard stops for sensitive categories and prompt-injection indicators.
-- Pinned model snapshot, ZDR routing, provider allowlist, and data-collection denial.
-- Signed and expiring OAuth state.
-- Identity Platform JWT validation, role checks, and MFA gates.
-- Google OIDC validation on worker entry points.
-- Optimistic locking, event deduplication, idempotent publication, and canonical rereads.
-- PostgreSQL schema with RLS policies, full-text search, and vector indexes.
-- Append-only audit protections.
-- Private Cloud SQL networking, Secret Manager, KMS, encrypted backups, and PITR configuration.
-- Frozen dependency and Terraform provider lockfiles with continuous integration checks.
-
-## Production security gates
-
-The following work remains mandatory before production:
-
-- replace the in-memory API store with the transactional PostgreSQL repository;
-- run tenant-isolation tests against a real PostgreSQL instance with RLS enabled;
-- integrate and verify KMS encryption and decryption for Google refresh tokens;
-- enforce MFA in Identity Platform and test claim revocation and session expiry;
-- verify OAuth revocation, location disconnect, and notification removal end to end;
-- complete DAST, dependency review, backup restoration, and incident-response exercises;
-- verify OpenRouter provider eligibility, ZDR behavior, DPA/SCC terms, and regional processing requirements;
-- configure production alerting, dead-letter runbooks, secret rotation, and purge monitoring;
-- perform physical-device push testing without sensitive notification content;
-- complete privacy review, DPIA where applicable, and Google policy approval for the operating model.
-
-Until these gates are complete, the repository should be treated as a security-conscious pilot—not as evidence of production certification or regulatory compliance.
+Google approval and policy confirmation; live OAuth/Pub/Sub/revocation; Cloud SQL grants and tenant tests; KMS encryption/decryption; actual provider/ZDR/region behavior; identity/TOTP/revocation; lost-response publication recovery; physical iOS/Android push/deep links; dependency/DAST review; purge/backup restoration; privacy terms and store signing remain mandatory. None is established solely by local tests or Terraform validation.

@@ -2,276 +2,150 @@
 
 # AutoReview
 
-### Human-controlled AI responses for Google Business Profile reviews
+### Thoughtful AI replies. Human accountability.
 
-AutoReview turns incoming reviews into grounded, brand-consistent reply drafts and routes every sensitive decision through a deterministic approval workflow.
+A review operations platform for Google Business Profile, with approved business knowledge, authenticated approval workflows, and conservative automation controls.
 
-[![CI](https://github.com/DevvoLazza/AutoReview/actions/workflows/ci.yml/badge.svg)](https://github.com/DevvoLazza/AutoReview/actions/workflows/ci.yml)
+[![CI](https://github.com/DevvoLazza/AutoReview/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/DevvoLazza/AutoReview/actions/workflows/ci.yml)
 [![Node.js](https://img.shields.io/badge/Node.js-24_LTS-339933?logo=nodedotjs&logoColor=white)](https://nodejs.org/)
 [![Next.js](https://img.shields.io/badge/Next.js-16-000000?logo=nextdotjs&logoColor=white)](https://nextjs.org/)
 [![Expo](https://img.shields.io/badge/Expo-57-000020?logo=expo&logoColor=white)](https://expo.dev/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-**Executable pilot · Multi-tenant by design · Automation disabled by default**
+**Runnable local demo · Production-oriented pilot · Automation off by default**
 
 </div>
 
----
-
 ## Overview
 
-Responding to customer reviews well requires speed, context, a consistent voice, and careful handling of sensitive situations. AutoReview automates preparation—not accountability.
-
-The AI model can draft a response, identify risks, and cite the approved knowledge it used. It cannot access Google credentials, query the database directly, enable automation, or publish a response. Authorization and publication remain under application control.
+AutoReview prepares context-aware replies and keeps publication under application control. An AI model receives the review and relevant approved knowledge; it never receives Google credentials, database access, tools, or permission to publish.
 
 ```text
-Google review
-    → Pub/Sub event
-    → canonical review retrieval
-    → approved business knowledge + AI drafting
-    → independent validation and risk controls
-    → approval, revision, rejection, or scheduled delivery
-    → Google publication
-    → reconciliation and audit
+Google review → authenticated event → canonical retrieval → approved knowledge
+             → AI draft + independent validation → human approval or eligible rule
+             → canonical recheck → publication → confirmation + audit
 ```
-
-## Product capabilities
-
-### Human approval workflow
-
-- Web and mobile inboxes for reviews requiring attention.
-- Reply drafts generated in the language of the original review.
-- Approve, edit, reject, or request a revised draft.
-- Natural-language revision instructions such as “make it shorter and more empathetic.”
-- Optimistic concurrency control prevents two users from publishing competing replies.
-- The canonical Google review is retrieved again immediately before publication.
-
-### Controlled business knowledge
-
-- Tenant- and location-specific business profiles.
-- Brand voice, supported languages, services, hours, contact details, and FAQs.
-- Escalation rules for complaints, refunds, and sensitive topics.
-- Versioned sources with `draft`, `approved`, and `retired` lifecycle states.
-- Hybrid full-text and vector retrieval using PostgreSQL and `pgvector`.
-- Only approved, currently valid sources may influence a reply.
-- Human edits contribute to evaluation data; they never modify knowledge automatically.
-
-### Guarded automation
-
-- Rules scoped by location, rating, language, review text, category, and delay.
-- A minimum of 20 manual reviews before a location becomes eligible for automation.
-- A default 10-minute cancellation window before scheduled publication.
-- Daily publication limits and a global kill switch.
-- Non-bypassable hard stops for legal threats, health incidents, discrimination, fraud, refunds, chargebacks, personal data, employee allegations, and violent language.
-
-### Operations and accountability
-
-- Push notifications never contain review text.
-- Notifications deep-link to an authenticated screen; approval never happens inside the notification.
-- Idempotent event processing and publication attempts.
-- Controlled retries, dead-letter handling, and final-state reconciliation.
-- Append-only audit records for actor, decision, model, provider, prompt version, and knowledge version.
-- Scheduled removal of temporary Google content within the required retention window.
-
-## Architecture
-
-```mermaid
-flowchart LR
-    GBP[Google Business Profile] --> PS[Pub/Sub]
-    PS --> W[Cloud Run worker]
-    W --> API[NestJS API]
-    WEB[Next.js dashboard] --> API
-    APP[Expo mobile app] --> API
-    API --> DB[(Cloud SQL PostgreSQL + pgvector)]
-    API --> AI[OpenRouter]
-    API --> TASKS[Cloud Tasks]
-    TASKS --> W
-    API --> PUSH[Expo Push]
-    API --> GBP
-```
-
-| Layer | Technology | Responsibility |
-| --- | --- | --- |
-| Dashboard | Next.js 16, React 19 | Inbox, knowledge, rules, team, and audit |
-| Mobile | Expo 57, React Native 0.86 | Push-driven review and approval workflow |
-| API | NestJS 12, Fastify 5 | Authentication, authorization, workflow, and OpenAPI |
-| Worker | Node.js, Fastify | Pub/Sub ingestion, Cloud Tasks, retries, and retention |
-| Domain | TypeScript, Zod | State machine, hard stops, contracts, and validation |
-| Data | PostgreSQL 17, Drizzle, pgvector | Tenant isolation, knowledge retrieval, and audit |
-| AI | OpenRouter, pinned DeepSeek snapshot | Structured drafting without tools or data access |
-| Infrastructure | Google Cloud, Terraform | Cloud Run, Cloud SQL, Pub/Sub, Tasks, KMS, and secrets |
-
-The configured model is the immutable `deepseek/deepseek-v4-pro-0813` snapshot. Requests use Structured Outputs, a provider allowlist, `data_collection: "deny"`, and Zero Data Retention routing. The model returns a structured `ReplyDraft`; the deterministic policy engine alone decides whether the workflow may proceed.
-
-## Review lifecycle
-
-```mermaid
-stateDiagram-v2
-    [*] --> received
-    received --> generating
-    generating --> pending_approval
-    generating --> scheduled_auto
-    generating --> needs_attention
-    pending_approval --> publishing: approve
-    pending_approval --> rejected: reject
-    scheduled_auto --> pending_approval: cancel automation
-    scheduled_auto --> publishing: cancellation window expires
-    publishing --> published
-    publishing --> needs_attention: terminal failure
-```
-
-Every mutation includes an `expectedVersion`. Stale commands return `409 version_conflict`. Before publication, the API retrieves the canonical review again. If the review changed or already has a reply, the draft is invalidated and returned for reassessment.
-
-## Project maturity
-
-This repository contains an **end-to-end pilot that runs with simulated data**, plus adapters and infrastructure boundaries for real services.
-
-| Capability | Status |
-| --- | --- |
-| Responsive operations dashboard | Implemented |
-| iOS and Android companion app | Implemented; platform bundles verified |
-| Approval workflow and hard stops | Implemented and tested |
-| Real and simulated Google adapters | Implemented |
-| Structured OpenRouter provider | Implemented |
-| PostgreSQL schema, RLS, and migrations | Implemented |
-| Google Cloud Terraform stack | Implemented and validated |
-| Pilot against a real Google location | External Google approval and credentials required |
-| PostgreSQL-backed API repository | Required before production |
-| Physical-device push and store releases | Verification required |
-| Commercial multi-tenant SaaS operation | Written Google confirmation required |
 
 > [!IMPORTANT]
-> AutoReview is not currently represented as production-ready. Local development uses simulated authentication, Google, AI, and scheduling by default. No real review is published in the development workflow.
+> The application is locally runnable and has real-service adapters, a persistent PostgreSQL repository, and validated infrastructure configuration. A real Google pilot has **not** been verified: Google API approval, service credentials, cloud deployment, and physical-device testing are still required. Local demo mode never publishes to Google.
+
+## Features
+
+- **Review operations:** paginated web/mobile inboxes, manual editing, natural-language revisions, approval, rejection, schedule cancellation, and recovery from uncertain publication.
+- **Business knowledge:** tenant/location scoping, source versions, approval and retirement, validity dates, PDF/DOCX/TXT/Markdown extraction, and PostgreSQL full-text plus vector retrieval.
+- **Grounded drafting:** structured output, source identifiers visible to approvers, a separate validation request, unsupported-claim detection, and source-version revalidation before sending.
+- **Conservative automation:** disabled rules, owner consent and MFA, 20 confirmed manual approvals per location, daily limits, cancellation delay, global kill switch, and an operator-controlled release gate.
+- **Sensitive-case escalation:** deterministic risk checks and model validation prevent flagged cases from automatic delivery. Detection is not a guarantee that every sensitive phrase in every language will be recognized; review language/category evaluations remain release requirements.
+- **Authenticated access:** Identity Platform email/password and TOTP, web HttpOnly encrypted sessions, native SecureStore sessions, role checks, and live account/revocation verification.
+- **Reliable publication:** atomic version checks and persisted intent, canonical Google rereads, confirmation after PUT, and GET-only reconciliation after uncertain outcomes.
+- **Private notifications:** content-free push payloads, authenticated deep links, persisted submission retries, invalid-device removal, and an inbox that works without push delivery.
+- **Operational safeguards:** forced PostgreSQL RLS, non-owner runtime credentials, KMS-encrypted Google tokens, append-only metadata audit, temporary-content expiry, and Terraform monitoring alerts.
 
 ## Quick start
 
-### Requirements
+Requires **Node.js 24 LTS** and **pnpm 11.19.0**. No Google project, AI key, Docker installation, or mobile account is needed for the local demo.
 
-- Node.js 24 LTS
-- pnpm 11
-- Docker Desktop, when running PostgreSQL locally
-
-### Installation
-
-```powershell
+```bash
 git clone https://github.com/DevvoLazza/AutoReview.git
-Set-Location AutoReview
-Copy-Item .env.example .env
-pnpm install
-pnpm dev
+cd AutoReview
+pnpm install --frozen-lockfile
+pnpm build
+pnpm dev:demo
 ```
 
-Local services:
+Open **http://localhost:3000**. The launcher explicitly selects simulated Google/AI, demonstration authentication, and volatile in-memory storage. Stop it with `Ctrl+C`; demo data resets when the API restarts.
 
-| Service | URL |
+| Local service | Address |
 | --- | --- |
 | Dashboard | `http://localhost:3000` |
-| API | `http://localhost:4100/v1` |
+| REST API | `http://localhost:4100/v1` |
 | Swagger UI | `http://localhost:4100/docs` |
-| OpenAPI document | `http://localhost:4100/openapi.json` |
-| Worker | `http://localhost:4200` |
+| OpenAPI | `http://localhost:4100/openapi.json` |
 
-The dashboard and mobile app fall back to demonstration data when the API is unavailable. To simulate a new review while the API is running:
-
-```powershell
-Invoke-RestMethod -Method Post `
-  -Uri http://localhost:4100/v1/webhooks/google-business/demo
-```
-
-### Local PostgreSQL
+Simulate an incoming review from PowerShell:
 
 ```powershell
-docker compose up -d postgres
-pnpm db:migrate
+Invoke-RestMethod -Method Post -Uri http://localhost:4100/v1/webhooks/google-business/demo -ContentType application/json -Body '{}'
 ```
+
+Open **Recensioni**, inspect its draft and sources, edit or request a revision, then approve. Publication is simulated. API failures show an error and retry action; clients do **not** silently substitute demo data.
+
+For persistent development, authentication, mobile builds, and cloud deployment, follow the [setup guide](docs/setup.md).
+
+## Technology and layout
+
+| Component | Stack |
+| --- | --- |
+| Dashboard | Next.js 16, React 19, App Router, same-origin server-side API proxy |
+| Mobile | Expo SDK 57, React Native 0.86, Expo Router, development builds |
+| API / worker | NestJS, Fastify, TypeScript, shared Zod contracts |
+| Storage / retrieval | PostgreSQL 17, Drizzle, `pgvector`, Vertex AI embeddings |
+| Reply generation | OpenRouter, configured immutable DeepSeek snapshot, JSON Schema |
+| Cloud | Cloud Run, Cloud SQL, Pub/Sub, Tasks, Scheduler, Identity Platform, KMS, Secret Manager |
+| Delivery / tests | pnpm, Turborepo, Terraform, GitHub Actions, Vitest, PGlite, Playwright |
+
+```text
+apps/api/              Authentication, Google onboarding, knowledge, review workflow
+apps/worker/           OIDC-verified events, scheduled delivery, retention and push retry
+apps/web/              Operations dashboard and encrypted web sessions
+apps/mobile/           Authenticated iOS/Android companion app
+packages/contracts/    Shared request and domain schemas
+packages/core/         AI/Google interfaces, safety policy and automation engine
+packages/database/     Runtime repository, retrieval, migrations and isolation tests
+infra/terraform/       Dedicated pilot infrastructure
+docs/                  Setup, architecture, API, security and release guidance
+```
+
+The pilot intentionally accepts **one configured workspace** in production. Storage isolation is multi-tenant by design, but commercial SaaS onboarding, billing, self-service team administration, and third-party integration APIs are not included. User access is provisioned with an administrator CLI. Original uploaded document binaries are not archived; approved extracted text is stored.
 
 ## Configuration
 
-Available environment variables are documented in [.env.example](.env.example). Safe local defaults are explicit:
+See [.env.example](.env.example) and [setup](docs/setup.md). The default reply snapshot is `deepseek/deepseek-v4-pro-0813`; deployments can change it without rewriting clients or knowledge. Evaluate any replacement before release.
 
-```dotenv
-AUTH_MODE=demo
-AI_MODE=mock
-GOOGLE_MODE=mock
-TASKS_MODE=mock
-```
+Live AI requests require a reviewed provider allowlist and request `zdr: true`, `data_collection: "deny"`, and required-parameter support. Verify actual endpoint eligibility, disable optional OpenRouter prompt logging, and assess processing region and contractual terms. These request settings alone are not proof of EU-only processing or legal compliance.
 
-Production credentials must be supplied through Secret Manager. Google refresh tokens must be encrypted with Cloud KMS before persistence. Never commit credentials, tokens, `.env` files, or real review data.
+Production refuses demo adapters, volatile storage, missing secrets, insecure public origins, and privileged database roles. Automatic publication also requires `AUTOMATION_RELEASE_APPROVED=true`, a disabled kill switch, an enabled consented rule, and all safety checks. Leave the release flag **false** throughout the initial pilot.
 
 ## Verification
 
-```powershell
+```bash
 pnpm lint
 pnpm typecheck
 pnpm test
 pnpm build
-pnpm audit --prod
+pnpm test:e2e
+pnpm --filter @reviewguard/mobile exec expo export --platform android --output-dir dist-android
+pnpm --filter @reviewguard/mobile exec expo export --platform ios --output-dir dist-ios
 ```
 
-The automated suite covers:
+Browser tests exercise desktop and mobile web workflows, dynamically imported reviews, knowledge lifecycle, saved settings, and visible failure/retry states. Install Chromium with `pnpm --filter @reviewguard/web exec playwright install chromium` if no supported local browser is available.
 
-- state-machine transitions and version conflicts;
-- hard stops and automation eligibility;
-- `ReplyDraft` validation and OpenRouter request controls;
-- Pub/Sub redelivery and event deduplication;
-- draft generation, approval, and publication API behavior;
-- web, Android, and iOS bundles.
+Database tests run real PostgreSQL semantics in PGlite/WASM with `pgvector`, including cross-tenant RLS, pooled-context reset, concurrent writes, atomic publication intent, audit immutability, expiry, and hybrid source filtering. Set `TEST_DATABASE_URL` to run the optional TCP PostgreSQL integration check against an **isolated test database**. It is skipped when no test server is supplied.
 
-GitHub Actions runs linting, type checking, tests, production builds, and Terraform formatting and validation with a required lockfile.
+JavaScript platform exports are build checks—not signed APK/IPA files, physical-device evidence, or store approval. GitHub Actions checks application code, browser workflows, mobile exports, and Terraform formatting/validation; it does not deploy cloud resources.
 
-## Repository structure
+## Going live
 
-```text
-AutoReview/
-├── apps/
-│   ├── api/             REST API, OAuth, authorization, and workflow
-│   ├── worker/          Pub/Sub, Cloud Tasks, retries, and retention
-│   ├── web/             Next.js operations dashboard
-│   └── mobile/          Expo iOS and Android app
-├── packages/
-│   ├── contracts/       shared Zod contracts
-│   ├── core/            domain, AI, Google, and policy engine
-│   └── database/        Drizzle, PostgreSQL, RLS, and pgvector
-├── infra/terraform/     Google Cloud infrastructure
-├── docs/                architecture, API, security, and go-live guidance
-└── .github/workflows/   continuous integration
-```
+1. Obtain Google Business Profile API access and authorize a real business/location.
+2. Provision the dedicated cloud project, migrate the database, configure Identity Platform, and grant users their scoped roles.
+3. Verify Google OAuth, canonical reads, authenticated Pub/Sub, provider/ZDR routing, embeddings, and one manually approved publication.
+4. Test account revocation, concurrent approval, lost publication responses, retention, alerts, and backup restoration.
+5. Validate native authentication, deep links and push on physical iOS/Android devices; complete signing and release requirements.
+6. Complete privacy/contractual review and obtain written Google confirmation before expanding to commercial SaaS or automatic client replies.
 
-## Documentation
+The detailed [Google go-live checklist](docs/go-live-google.md) distinguishes implemented controls from external acceptance evidence. Google does not provide a full dedicated sandbox; simulated adapters do not replace a controlled real-location pilot.
 
+## Documentation and contribution
+
+- [Setup and deployment](docs/setup.md)
 - [Architecture and trust boundaries](docs/architecture.md)
-- [API endpoints and contracts](docs/api.md)
+- [API reference](docs/api.md)
 - [Engineering security model](docs/security.md)
-- [Security policy and vulnerability reporting](SECURITY.md)
-- [Google go-live checklist](docs/go-live-google.md)
+- [Vulnerability reporting](SECURITY.md)
+- [Google pilot acceptance](docs/go-live-google.md)
 
-## Production readiness checklist
-
-1. Obtain access to the Google Business Profile APIs.
-2. Configure OAuth, Identity Platform, and enforced MFA.
-3. Replace the in-memory API store with the transactional PostgreSQL repository.
-4. Enable KMS encryption for Google refresh tokens.
-5. Configure OpenRouter and verify provider, ZDR, and processing-location requirements.
-6. Apply migrations and Terraform in a dedicated Google Cloud project.
-7. Exercise Pub/Sub, push delivery, OAuth revocation, and publication against one real location with automation disabled.
-8. Complete physical-device testing before TestFlight or Play Internal Testing.
-9. Complete privacy, DPA/SCC, incident-response, backup-restore, and store-listing work.
-
-Google Business Profile does not provide a complete sandbox. The simulated adapter makes local development and CI deterministic, but it does not replace the controlled real-location pilot.
-
-## Contributing
-
-Development happens on `dev`; `main` represents the synchronized release branch. Before proposing a change, run:
-
-```powershell
-pnpm lint
-pnpm typecheck
-pnpm test
-pnpm build
-```
-
-Keep commits focused, reviewable, and independently meaningful. Do not commit secrets, `.env` files, personal data, or production review content.
+Branch from `dev`, keep commits focused, and target pull requests at `dev`. `main` is the synchronized release branch. Run the relevant checks before submitting changes. Never commit secrets, `.env` files, Terraform state, or real customer review data.
 
 ## License
 
-Licensed under the [MIT License](LICENSE). Copyright © 2026 Lazzaro Davide.
+AutoReview is licensed under the [MIT License](LICENSE). Copyright © 2026 Lazzaro Davide.
