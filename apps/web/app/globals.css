@@ -15,6 +15,67 @@
   --blue-bg: #e6f1f7;
   --shadow: 0 12px 36px rgba(34, 48, 40, 0.07);
 }
+
+/* Shared form layout; colors and controls reuse the existing theme tokens. */
+.auth-page {
+  min-height: 100dvh;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+.auth-card {
+  width: min(100%, 480px);
+  padding: 32px;
+  display: grid;
+  gap: 16px;
+}
+.auth-card h1 {
+  margin: 0;
+}
+.auth-card label,
+.operational-form label {
+  display: grid;
+  gap: 8px;
+  font-size: 14px;
+}
+.auth-card input,
+.operational-form input,
+.operational-form select,
+.operational-form textarea {
+  width: 100%;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: var(--paper);
+  color: var(--ink);
+  font: inherit;
+}
+.operational-form {
+  display: grid;
+  gap: 16px;
+}
+.operational-panel {
+  padding: 24px;
+  margin-bottom: 20px;
+}
+.operational-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  align-items: center;
+}
+.privacy-note {
+  font-size: 12px;
+  color: var(--muted);
+}
+.source-content {
+  white-space: pre-wrap;
+  max-height: 360px;
+  overflow: auto;
+}
+.operational-form input[type="checkbox"] {
+  width: auto;
+}
 * {
   box-sizing: border-box;
 }

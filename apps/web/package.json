@@ -8,15 +8,19 @@
     "start": "next start --port 3000",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --passWithNoTests",
+    "test:e2e": "playwright test",
     "test:coverage": "vitest run --coverage --passWithNoTests"
   },
   "dependencies": {
     "@reviewguard/contracts": "workspace:*",
+    "@reviewguard/core": "workspace:*",
     "next": "16.3.5",
     "react": "19.2.3",
-    "react-dom": "19.2.3"
+    "react-dom": "19.2.3",
+    "zod": "4.6.5"
   },
   "devDependencies": {
+    "@playwright/test": "1.63.0",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
     "typescript": "5.9.3",
