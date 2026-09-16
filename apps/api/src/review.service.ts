@@ -40,7 +40,9 @@ export class ReviewService {
     let review = await this.store.createReview(principal.tenantId, snapshot, updatedEvent);
     if (
       snapshot.existingReply ||
-      ["pending_approval", "scheduled_auto", "published", "publishing"].includes(review.status)
+      ["pending_approval", "scheduled_auto", "published", "publishing", "rejected"].includes(
+        review.status,
+      )
     )
       return review;
     if (review.status === "generating") {
@@ -106,6 +108,7 @@ export class ReviewService {
       if (current.wasUpdated) flags.push("review_updated");
       if (!knowledge.length) flags.push("insufficient_knowledge");
       if (
+        (knowledge.length > 0 && generated.value.knowledgeSourceIds.length === 0) ||
         generated.value.knowledgeSourceIds.some(
           (sourceId) => !knowledge.some((entry) => entry.sourceId === sourceId),
         ) ||

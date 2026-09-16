@@ -136,4 +136,25 @@ describe("Publication recovery and canonical review checks", () => {
     expect(response.json().activeDraft.riskFlags).toContain("review_updated");
     expect(response.json().status).toBe("pending_approval");
   });
+  it("does not regenerate a rejected unchanged review on a later duplicate event", async () => {
+    const response = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks/google-business/demo",
+      payload: {},
+    });
+    const review = response.json();
+    const rejected = await app.inject({
+      method: "POST",
+      url: `/v1/reviews/${review.id}/reject`,
+      payload: { expectedVersion: review.version },
+    });
+    expect(rejected.json().status).toBe("rejected");
+    const duplicate = await app.inject({
+      method: "POST",
+      url: "/v1/webhooks/google-business/demo",
+      payload: review.snapshot,
+    });
+    expect(duplicate.json().status).toBe("rejected");
+    expect(duplicate.json().version).toBe(rejected.json().version);
+  });
 });
